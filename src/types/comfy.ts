@@ -87,6 +87,8 @@ export interface LoadGraphDataOptions {
   silentAssetErrors?: boolean
   workflowNavigationId?: number
   isCurrent?: () => boolean
+  /** Set by the change tracker for its own undo and redo. Extensions must not set it. */
+  restoresHistory?: boolean
 }
 
 /**
