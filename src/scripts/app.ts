@@ -855,6 +855,11 @@ export class ComfyApp implements IComfyApp {
       )) {
         setNodePreviewsByExecutionId(executionId, [blobUrl])
       }
+      useComfyApiStore().deliverPreview(
+        this.rootGraph,
+        displayNodeExecutionId,
+        blob
+      )
       releaseSharedObjectUrl(blobUrl)
     })
 
