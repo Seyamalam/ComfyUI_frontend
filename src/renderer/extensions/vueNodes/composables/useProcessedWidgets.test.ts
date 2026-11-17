@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { assert, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed } from 'vue'
+import { reportError } from '@comfyorg/telemetry/reportError'
 
 import { LGraph, LGraphNode } from '@/lib/litegraph/src/litegraph'
 import {
@@ -17,6 +18,7 @@ import WidgetLegacy from '@/renderer/extensions/vueNodes/widgets/components/Widg
 import { useExecutionErrorStore } from '@/stores/executionErrorStore'
 import { useLinkStore } from '@/stores/linkStore'
 import { useWidgetValueStore } from '@/stores/widgetValueStore'
+import { useWidgetFolderLockStore } from '@/stores/widgetFolderLockStore'
 import type { WidgetRenderState } from '@/stores/widgetValueStore'
 import {
   createNodeExecutionId,
@@ -483,6 +485,76 @@ describe('promoted subgraph widgets', () => {
     )
   })
 
+  it('derives promoted sizing from the current concrete source without re-registering the host', () => {
+    const { graph, subgraph, hostNode } = setupComplexPromotionFixture()
+    const sourceNode = subgraph.getNodeById(INTERIOR_ID)
+    const sourceWidget = sourceNode?.widgets?.find(
+      (widget) => widget.name === 'string_a'
+    )
+    assert.exists(sourceNode)
+    assert.exists(sourceWidget)
+    sourceWidget.computeLayoutSize = (node) => ({
+      minHeight: node.size[0] / 3,
+      minWidth: 0
+    })
+    sourceNode.size = [183, 100]
+    const processed = processHostWidget(graph, hostNode)
+
+    expect(processed.sizing).toMatchObject({
+      kind: 'growable',
+      minHeight: 61
+    })
+
+    sourceNode.size = [249, 100]
+
+    expect(processed.sizing).toMatchObject({
+      kind: 'growable',
+      minHeight: 83
+    })
+  })
+
+  it.for(['computeSize', 'computeLayoutSize'] as const)(
+    'drops the sizing when %s throws, reports it once, and recovers without re-registration',
+    (callback) => {
+      const { graph, subgraph, hostNode } = setupComplexPromotionFixture()
+      const sourceWidget = subgraph
+        .getNodeById(INTERIOR_ID)
+        ?.widgets?.find((widget) => widget.name === 'string_a')
+      assert.exists(sourceWidget)
+      const value = sourceWidget.value
+      sourceWidget.type = `throws-in-${callback}`
+      sourceWidget.computeSize = undefined
+      const cause = new Error('Extension sizing failed')
+      sourceWidget[callback] = () => {
+        throw cause
+      }
+      const processed = processHostWidget(graph, hostNode)
+
+      expect([processed.sizing, processed.sizing]).toEqual([
+        undefined,
+        undefined
+      ])
+      expect(reportError).toHaveBeenCalledExactlyOnceWith(
+        cause,
+        expect.objectContaining({
+          errorType: 'error_measuring_widget',
+          surface: 'graph',
+          tags: { outcome: 'degraded' }
+        })
+      )
+
+      sourceWidget.computeSize = undefined
+      sourceWidget.computeLayoutSize = () => ({ minWidth: 0, minHeight: 67 })
+
+      expect(processed.sizing).toEqual({
+        kind: 'growable',
+        minWidth: 0,
+        minHeight: 67
+      })
+      expect(sourceWidget.value).toEqual(value)
+    }
+  )
+
   it.for([
     ['shows on the node canvas', { advanced: true }, false, true],
     ['shows when selected in App Mode', { advanced: true }, true, true],
@@ -572,9 +644,9 @@ describe('computeProcessedWidgets', () => {
     node.serialize_widgets = true
     const store = useWidgetValueStore()
     const sibling = widgetId(GRAPH_ID, node.id, 'sibling')
-    store.setWidgetFolderLock(sibling, { directory: ['SDXL'] })
+    useWidgetFolderLockStore().set(sibling, { directory: ['SDXL'] })
 
-    store.setWidgetFolderLock(id, { directory: ['MOSS', 'image'] })
+    useWidgetFolderLockStore().set(id, { directory: ['MOSS', 'image'] })
     const saved = node.serialize()
     expect(saved).toMatchObject({
       properties: {
@@ -584,20 +656,22 @@ describe('computeProcessedWidgets', () => {
     })
     store.clearNode(GRAPH_ID, node.id)
     node.configure(saved)
-    expect(store.getWidgetFolderLock(id)?.directory).toEqual(['MOSS', 'image'])
+    expect(useWidgetFolderLockStore().get(id)?.directory).toEqual([
+      'MOSS',
+      'image'
+    ])
     expect(node.properties).not.toHaveProperty('widget_folder_locks')
-    store.setWidgetFolderLock(id, undefined)
+    useWidgetFolderLockStore().set(id, undefined)
     expect(node.serialize().properties?.widget_folder_locks).toEqual({
       sibling: ['SDXL']
     })
-    expect(store.getWidgetFolderLock(id)).toBeUndefined()
+    expect(useWidgetFolderLockStore().get(id)).toBeUndefined()
   })
 
   it('restores a detached copy under its new node identity without sharing the lock', () => {
     const { graph, node } = createGraphWithNode([])
-    const store = useWidgetValueStore()
     const originalId = widgetId(GRAPH_ID, node.id, 'model')
-    store.setWidgetFolderLock(originalId, { directory: ['MOSS', 'image'] })
+    useWidgetFolderLockStore().set(originalId, { directory: ['MOSS', 'image'] })
     const saved = node.serialize()
     const copy = createNode([])
 
@@ -609,7 +683,7 @@ describe('computeProcessedWidgets', () => {
     const copyId = widgetId(GRAPH_ID, copy.id, 'model')
 
     expect(copyId).not.toBe(originalId)
-    expect(store.getWidgetFolderLock(copyId)).toEqual({
+    expect(useWidgetFolderLockStore().get(copyId)).toEqual({
       directory: ['MOSS', 'image']
     })
     expect(copy.properties).not.toHaveProperty('widget_folder_locks')
@@ -618,27 +692,26 @@ describe('computeProcessedWidgets', () => {
       model: ['MOSS', 'image']
     })
     graph.add(copy)
-    store.setWidgetFolderLock(copyId, undefined)
+    useWidgetFolderLockStore().set(copyId, undefined)
     expect(copy.serialize().properties).not.toHaveProperty(
       'widget_folder_locks'
     )
-    expect(store.getWidgetFolderLock(originalId)).toEqual({
+    expect(useWidgetFolderLockStore().get(originalId)).toEqual({
       directory: ['MOSS', 'image']
     })
   })
 
   it('does not resurrect a detached lock when configuring an unlocked snapshot', () => {
     const { graph, node } = createGraphWithNode([])
-    const store = useWidgetValueStore()
     const id = widgetId(GRAPH_ID, node.id, 'model')
     const unlocked = node.serialize()
-    store.setWidgetFolderLock(id, { directory: ['MOSS', 'image'] })
+    useWidgetFolderLockStore().set(id, { directory: ['MOSS', 'image'] })
     graph.remove(node)
 
     node.configure(unlocked)
     graph.add(node)
 
-    expect(store.getWidgetFolderLock(id)).toBeUndefined()
+    expect(useWidgetFolderLockStore().get(id)).toBeUndefined()
     expect(node.serialize().properties).not.toHaveProperty(
       'widget_folder_locks'
     )
@@ -770,7 +843,6 @@ describe('computeProcessedWidgets', () => {
         options: { advanced: true }
       },
       {
-        hasLayoutSize: true,
         isDOMWidget: true,
         tooltip: 'Choose checkpoint'
       }
@@ -783,13 +855,13 @@ describe('computeProcessedWidgets', () => {
     })
 
     expect(result[0]).toMatchObject({
-      hasLayoutSize: true,
       simplified: {
         name: 'display_slot',
         borderStyle: 'ring ring-primary'
       }
     })
     expect(result[0].vueComponent).toBe(WidgetDOM)
+    expect(result[0].sizing).toBeUndefined()
   })
 
   it('treats explicit isDOMWidget false as authoritative', () => {
