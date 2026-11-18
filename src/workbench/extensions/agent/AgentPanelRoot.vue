@@ -1201,6 +1201,7 @@ const {
       }
     },
     disowned: forgetCloudWorkflowId,
+    ownsWorkflowId: (workflowId) => storedWorkflowFor(workflowId) !== null,
     tabs: openTabsSnapshot,
     activeTab: enqueueActiveTab,
     draft: targetWorkflowDraft,
