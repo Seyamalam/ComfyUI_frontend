@@ -110,7 +110,6 @@ import { useFreeUsePlacement } from './experiments/freeUsePlacement'
 import AgentPanel from './components/agent/AgentPanel.vue'
 import AgentCreditTransitionNotice from './components/agent/AgentCreditTransitionNotice.vue'
 import AgentHostFenceNotice from './components/agent/AgentHostFenceNotice.vue'
-import RunNoticeBanner from './components/agent/RunNoticeBanner.vue'
 import { agentBoundWorkflowIdKey } from './components/agent/agentBoundWorkflowId'
 import AgentGraphActivityBar from './components/AgentGraphActivityBar.vue'
 import OnboardingCoach from './components/agent/OnboardingCoach.vue'
@@ -189,6 +188,7 @@ import { useApiKeyAuthStore } from '@/stores/apiKeyAuthStore'
 import { useAuthStore } from '@/stores/authStore'
 import { toSocketIdentity, useAgentPageSession } from './agentPageSession'
 import { useAgentChatHistoryStore } from './stores/agent/agentChatHistoryStore'
+import { useAgentOpenChatsStore } from './stores/agent/agentOpenChatsStore'
 import { useAgentNodeDefinitionRefreshStore } from './stores/agent/agentNodeDefinitionRefreshStore'
 import { agentMessageText } from './utils/agentMessageText'
 import {
@@ -237,6 +237,7 @@ const {
 } = useBillingContext()
 const conversationStore = useAgentConversationStore()
 const history = useAgentChatHistoryStore()
+const openChats = useAgentOpenChatsStore()
 const { accepted: consentAccepted, identity: consentIdentity } = storeToRefs(
   useAgentConsentStore()
 )
@@ -570,6 +571,7 @@ const workflowResolver = useAgentWorkflowResolver({
 })
 const {
   refreshCloudWorkflowIds,
+  refreshCloudWorkflowListing,
   forgetCloudWorkflowId,
   cloudIdFor,
   boundOrOpenWorkflowFor,
@@ -1148,7 +1150,7 @@ const {
   isSending: sessionIsSending,
   isTranscriptReady,
   newChat,
-  openBlankChat,
+  openBlankChat: reopenBlankChat,
   start,
   stop,
   entries,
@@ -1235,6 +1237,10 @@ provide(
 const isSending = computed(
   () => sessionIsSending.value || composerStore.gateHold !== null
 )
+
+if (agentPanelStore.blankChatTab === null)
+  agentPanelStore.blankChatTab =
+    workflowStore.activeWorkflow?.instanceId ?? null
 
 const isBoundWorkflowActive = computed(() => {
   const bound = boundWorkflowId.value
@@ -2054,19 +2060,39 @@ const historyGroups = computed(() => {
   )
 })
 
+function openBlankChat(source?: Parameters<typeof newChat>[0]): void {
+  agentPanelStore.blankChatTab =
+    workflowStore.activeWorkflow?.instanceId ?? null
+  newChat(source)
+}
+
+function showBlankChatForVisibleWorkflow(): void {
+  const alreadyShowsIt =
+    threadId.value === null &&
+    agentPanelStore.followsVisibleWorkflow &&
+    agentPanelStore.blankChatTab ===
+      (workflowStore.activeWorkflow?.instanceId ?? null)
+  if (alreadyShowsIt) return
+  provisionalTitle.value = undefined
+  if (!composerStore.hasDraft) composerStore.setText('')
+  openBlankChat()
+  agentPanelStore.startFollowingVisibleWorkflow()
+}
+
 const workflowChatFollow = useAgentWorkflowChatFollow({
   activeWorkflow: () => workflowStore.activeWorkflow,
   selectedTarget: () => selectedTarget.value,
   currentThreadId: () => threadId.value,
-  sessions: () => history.sessions,
+  chatsFor: history.sessionsFor,
+  openChatFor: openChats.recall,
+  forgetOpenChat: openChats.forget,
   followsVisibleWorkflow: () => agentPanelStore.followsVisibleWorkflow,
-  hasDraft: () => composerStore.hasDraft,
   userEngaged,
   cloudIdFor,
-  refreshCloudWorkflowIds,
+  refreshCloudWorkflowListing,
   refreshHistory,
   loadThread,
-  clearDraft: () => composerStore.setText(''),
+  showBlankChat: showBlankChatForVisibleWorkflow,
   trackThreadStarted: () =>
     useTelemetry()?.trackAgentThreadStarted({ source: 'history_select' }),
   restoreThreadWorkflow,
@@ -2075,12 +2101,20 @@ const workflowChatFollow = useAgentWorkflowChatFollow({
 })
 
 const {
-  failure: followFailure,
+  landing,
   openingWorkflowName,
   followTab,
   retireFollow,
   retryFollow: onRetryFollow
 } = workflowChatFollow
+
+watch(
+  [threadId, boundWorkflowId],
+  ([id, workflowId]) => {
+    if (id !== null && workflowId !== null) openChats.remember(workflowId, id)
+  },
+  { immediate: true, flush: 'sync' }
+)
 
 watch(
   threadId,
@@ -2155,11 +2189,21 @@ workflowStore.onUserActivation((workflow) => void followTab(workflow))
 
 watch(userEngaged, workflowChatFollow.userEngagementChanged)
 
+watch(
+  threadId,
+  (id) => {
+    if (id !== null && !workflowChatFollow.isOpeningThread(id)) retireFollow()
+  },
+  { flush: 'sync' }
+)
+
 const mountedOn = workflowStore.activeWorkflow
 if (
   mountedOn !== null &&
   selectedTarget.value !== null &&
-  selectedTarget.value.path !== mountedOn.path
+  (selectedTarget.value.path !== mountedOn.path ||
+    (threadId.value === null &&
+      agentPanelStore.blankChatTab !== mountedOn.instanceId))
 )
   void followTab(mountedOn)
 
@@ -2552,6 +2596,7 @@ function onDeleteHistory(id: string): void {
     id === history.activeId ||
     (history.activeId === null && id === threadId.value)
   history.remove(id)
+  openChats.forget(id)
   // Deleting the open chat also ends it; a dead thread must not stay editable.
   if (isCurrent) onNewChat('history_delete')
 }
@@ -2596,7 +2641,7 @@ function showOffscreenBlankSend(
   agentPanelStore.view = { screen: 'chat' }
   retireFollow()
   resetComposerForChatSwitch()
-  if (openBlankChat(blankChatId)) {
+  if (reopenBlankChat(blankChatId)) {
     void proactive.refresh()
     agentPanelStore.startFollowingVisibleWorkflow()
   }
@@ -2635,12 +2680,12 @@ function onNewChat(
 ): void {
   retireFollow()
   if (source === 'history_back') {
-    newChat()
+    openBlankChat()
     agentPanelStore.startFollowingVisibleWorkflow()
     return
   }
   resetComposerForChatSwitch()
-  newChat(source)
+  openBlankChat(source)
   void proactive.refresh()
   agentPanelStore.startFollowingVisibleWorkflow()
 }
@@ -3013,6 +3058,7 @@ onMounted(() => agentPanelRenderStore.reach('drawn'))
       :select-history="onSelectHistory"
       :current-chat-ready="currentChatReady"
       :opening-workflow-name="openingWorkflowName"
+      :landing="landing"
       :session-id="threadId"
       :custom-title="
         history.titleFor(threadId) ??
@@ -3072,6 +3118,7 @@ onMounted(() => agentPanelRenderStore.reach('drawn'))
       @standing-paywall-shown="onStandingPaywallShown"
       @retry-sync="retrySubscription"
       @new-chat="onNewChat"
+      @retry-landing="onRetryFollow"
       @start-tour="restartCoach"
       @toggle-size="agentPanelStore.toggleMaximize()"
       @close="onClosePanel"
@@ -3092,12 +3139,6 @@ onMounted(() => agentPanelRenderStore.reach('drawn'))
         <CrdtDevPanel :status="crdtStatus" :snapshot="crdtDebugSnapshot" />
       </template>
       <template #composerNotice>
-        <RunNoticeBanner
-          v-if="followFailure"
-          context="followFailed"
-          :workflow-name="followFailure.filename"
-          @retry="onRetryFollow"
-        />
         <AgentCreditTransitionNotice
           v-if="showCreditTransitionNotice"
           data-testid="agent-credit-transition-notice"
