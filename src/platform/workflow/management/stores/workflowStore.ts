@@ -1,7 +1,7 @@
 import { union } from 'es-toolkit/compat'
 import { createEventHook, until, useAsyncState } from '@vueuse/core'
 import { defineStore } from 'pinia'
-import { computed, markRaw, ref, shallowRef, watch } from 'vue'
+import { computed, markRaw, ref, shallowRef, toRaw, watch } from 'vue'
 import type { Raw } from 'vue'
 
 import { t } from '@/i18n'
@@ -527,7 +527,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     newPath: string
   ): Promise<boolean> => {
     const occupant = getWorkflowByPath(newPath)
-    if (occupant && occupant.path !== workflow.path) return false
+    if (occupant && toRaw(occupant) !== toRaw(workflow)) return false
     isBusy.value = true
     try {
       // Capture all needed values upfront
