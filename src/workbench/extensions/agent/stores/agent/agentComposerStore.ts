@@ -100,7 +100,7 @@ interface KeptDraft {
   starterPrompt: AgentStarterPromptSource | null
 }
 
-export interface CapturedReferenceInsertion {
+interface CapturedReferenceInsertion {
   draftKey: string | null
   activationCount: number
   from?: number
