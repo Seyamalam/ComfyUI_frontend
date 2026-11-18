@@ -168,6 +168,7 @@ import {
   isLoopbackOnlyRefusal
 } from './services/agent/agentRestClient'
 import { useAgentChatHistoryRefresh } from './composables/agent/useAgentChatHistoryRefresh'
+import { useAgentChatDrafts } from './composables/agent/useAgentChatDrafts'
 import { useAgentWorkflowChatFollow } from './composables/agent/useAgentWorkflowChatFollow'
 import { ensureSignedIn, hasAgentCredential } from './services/agent/agentAuth'
 import type { DraftSnapshot } from './services/agent/agentRestClient'
@@ -1241,6 +1242,8 @@ const isSending = computed(
 if (agentPanelStore.blankChatTab === null)
   agentPanelStore.blankChatTab =
     workflowStore.activeWorkflow?.instanceId ?? null
+const chatDrafts = useAgentChatDrafts({ threadId, isSending })
+const blankUploadNonce = ref(0)
 
 const isBoundWorkflowActive = computed(() => {
   const bound = boundWorkflowId.value
@@ -2074,7 +2077,6 @@ function showBlankChatForVisibleWorkflow(): void {
       (workflowStore.activeWorkflow?.instanceId ?? null)
   if (alreadyShowsIt) return
   provisionalTitle.value = undefined
-  if (!composerStore.hasDraft) composerStore.setText('')
   openBlankChat()
   agentPanelStore.startFollowingVisibleWorkflow()
 }
@@ -2088,6 +2090,7 @@ const workflowChatFollow = useAgentWorkflowChatFollow({
   forgetOpenChat: openChats.forget,
   followsVisibleWorkflow: () => agentPanelStore.followsVisibleWorkflow,
   userEngaged,
+  switchBlocked,
   cloudIdFor,
   refreshCloudWorkflowListing,
   refreshHistory,
@@ -2168,7 +2171,11 @@ async function onSelectHistory(
 }
 
 function userEngaged(): boolean {
-  return composerStore.hasDraft || isSending.value || workflowSelecting.value
+  return composerStore.hasDraft || switchBlocked()
+}
+
+function switchBlocked(): boolean {
+  return isSending.value || workflowSelecting.value
 }
 
 function restoreChatWorkflow(
@@ -2597,6 +2604,7 @@ function onDeleteHistory(id: string): void {
     (history.activeId === null && id === threadId.value)
   history.remove(id)
   openChats.forget(id)
+  chatDrafts.discardChatDraft(id)
   // Deleting the open chat also ends it; a dead thread must not stay editable.
   if (isCurrent) onNewChat('history_delete')
 }
@@ -2617,11 +2625,9 @@ function resetComposerForChatSwitch(): void {
     )
   cancelWorkflowSelection()
   canvasStore.stopNodePicking()
-  attachment.cancelAllUploads()
   replaceSelectionTags([])
   dismissedSelectionSignature.value = null
   errorAttachRun++
-  composerStore.clearDraft()
 }
 
 function showOffscreenBlankSend(
@@ -2684,8 +2690,13 @@ function onNewChat(
     agentPanelStore.startFollowingVisibleWorkflow()
     return
   }
+  const discardedBlankAttachments =
+    threadId.value === null ? composerStore.attachments.map(({ id }) => id) : []
+  for (const id of discardedBlankAttachments) attachment.cancelUpload(id)
+  if (threadId.value === null) blankUploadNonce.value += 1
   resetComposerForChatSwitch()
   openBlankChat(source)
+  composerStore.clearDraft()
   void proactive.refresh()
   agentPanelStore.startFollowingVisibleWorkflow()
 }
@@ -2801,6 +2812,7 @@ const attachment = useAttachment({
   maxBytes: () => flags.maxUploadSize ?? MAX_ATTACHMENT_BYTES,
   onError: warnAttachment,
   onDuplicate: notifyDuplicateAttachments,
+  draftScope: () => `${chatDrafts.draftKey.value}:${blankUploadNonce.value}`,
   staged: () => composerStore.attachments,
   stage: composerStore.addAttachment,
   update: composerStore.updateAttachment,
