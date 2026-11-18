@@ -94,7 +94,6 @@ const emit = defineEmits<{
   requestWorkflowReferences: []
   removeWorkflowReference: [id: string]
   openReferenceWorkflow: [workflowId: string, workflowName: string]
-  workflowTargetRequired: []
 }>()
 const { t } = useI18n()
 const skills = useSkillPacksStore()
@@ -103,11 +102,7 @@ const running = computed(() => streaming || submitting)
 
 const composer = useComposer({
   onSend: (_text, attachments) => {
-    if (workflowSelecting || submitting) return
-    if (!hasWorkflowTarget) {
-      emit('workflowTargetRequired')
-      return
-    }
+    if (!hasWorkflowTarget || workflowSelecting || submitting) return
     const prepared = composerPromptForSubmission(composer.prompt.value)
     if (workflowReferences.value.length > 0) {
       const { text: draft, workflowReferences: references } = prepared
@@ -435,7 +430,7 @@ const primaryActionDisabled = computed(
     openingChat ||
     (!running.value &&
       !sendBlockedReason.value &&
-      (workflowSelecting || !composer.canSend.value))
+      (!hasWorkflowTarget || workflowSelecting || !composer.canSend.value))
 )
 const skillSearchHint = computed(() =>
   skillQueryEmpty.value ? t('agent.typeToSearch') : undefined

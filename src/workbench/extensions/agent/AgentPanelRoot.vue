@@ -582,11 +582,7 @@ const {
   openTabsSnapshot
 } = workflowResolver
 const {
-  isSelecting: workflowSelecting,
-  selectingTarget,
   savingReference,
-  onVisibleWorkflowChanged,
-  selectTarget: onSelectWorkflowTarget,
   selectReference: onSelectWorkflowReference,
   restoreTarget: onWorkflowRestored,
   adoptTarget: adoptWorkflowTarget,
@@ -594,7 +590,6 @@ const {
   cancelSelection: cancelWorkflowSelection
 } = useAgentWorkflowSelection({
   resolver: workflowResolver,
-  canSelectTarget: () => !isSending.value && status.value === 'idle',
   warnWorkflowUnavailable,
   warnRestoreFailed,
   onTargetBound: (workflowId, previousWorkflowId, source) =>
@@ -1016,15 +1011,6 @@ const editableWorkflowId = computed(() => {
   const target = selectedTarget.value
   return target ? cloudIdFor(target) : undefined
 })
-
-const workflowTabs = computed<ActiveTab[]>(() =>
-  workflowStore.openWorkflows.map((tab) => ({
-    path: tab.path,
-    name: tab.filename,
-    isPersisted: tab.isPersisted,
-    modified: tab.isModified
-  }))
-)
 
 function onWorkflowAdopted(
   workflowId: string,
@@ -2175,7 +2161,7 @@ function userEngaged(): boolean {
 }
 
 function switchBlocked(): boolean {
-  return isSending.value || workflowSelecting.value
+  return isSending.value || savingReference.value
 }
 
 function restoreChatWorkflow(
@@ -2367,7 +2353,7 @@ async function consentAllowsSubmission(
 }
 
 const { submit: onSend, withdrawSubmission } = useAgentDraftSubmission({
-  canSubmit: () => !workflowSelecting.value && !isSending.value,
+  canSubmit: () => !savingReference.value && !isSending.value,
   onSubmit: agentPanelStore.retainWorkflowTarget,
   onRejected: sendGates.rejectDraft,
   target: () => selectedTarget.value,
@@ -2477,7 +2463,7 @@ function retryablePendingSend(clientMessageId: string) {
   )
     return null
   if (!canRetryPendingFailure(pending.failure)) return null
-  if (workflowSelecting.value || conversationStore.isOriginBusy(pending.origin))
+  if (savingReference.value || conversationStore.isOriginBusy(pending.origin))
     return null
   return pending
 }
@@ -2719,7 +2705,6 @@ watch(
   () => workflowStore.activeWorkflow,
   () => {
     canvasStore.stopNodePicking()
-    onVisibleWorkflowChanged()
   },
   { flush: 'sync' }
 )
@@ -3088,11 +3073,8 @@ onMounted(() => agentPanelRenderStore.reach('drawn'))
       :available-workflows="availableWorkflowReferences"
       :editable-workflow-id="editableWorkflowId"
       :active-tab="selectedTargetTab"
-      :workflow-tabs="workflowTabs"
       :visible-tab-path="workflowStore.activeWorkflow?.path ?? null"
       :follows-visible-workflow="agentPanelStore.followsVisibleWorkflow"
-      :selecting-tab-path="selectingTarget?.path ?? null"
-      :select-tab="onSelectWorkflowTarget"
       :workflow-detached="workflowDetached"
       :target-unavailable="agentPanelStore.targetUnavailable"
       :canvas-empty-after-turn="canvasEmptyAfterTurn"
