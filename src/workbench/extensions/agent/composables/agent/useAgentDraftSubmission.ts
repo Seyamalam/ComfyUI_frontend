@@ -135,21 +135,30 @@ export function useAgentDraftSubmission(
     composer.releaseRetainedAssets(pendingAssetOwnerKey(clientMessageId))
   }
 
-  async function submit(
+  function validateSubmissionTarget(
     text: string,
-    attachments: ComposerAttachment[],
-    references: WorkflowReference[] = []
-  ): Promise<void> {
+    attachments: ComposerAttachment[]
+  ): ComfyWorkflow | null {
     const target = options.target()
-    const reject = (reason: AgentComposerDropReason) =>
+    const reject = (reason: AgentComposerDropReason) => {
       options.onRejected?.(reason)
+      return null
+    }
     if (!options.canSubmit()) return reject('cannot_submit')
     if (composer.gateHold !== null) return reject('submission_pending')
     if (target === null) return reject('no_target')
     if (!text.trim() && attachments.length === 0) return reject('empty')
     if (attachments.some((attachment) => attachment.uploading))
       return reject('attachment_uploading')
+    return target
+  }
 
+  function stageSubmission(
+    text: string,
+    attachments: ComposerAttachment[],
+    references: WorkflowReference[],
+    target: ComfyWorkflow
+  ) {
     options.onSubmit()
     const prompt = composer.prompt
     const inputMethod = composer.promptOrigin
@@ -159,8 +168,8 @@ export function useAgentDraftSubmission(
     selection.exit()
     const nodes =
       selection.workflow() === target ? [...selection.staged.value] : []
-
     selection.consume()
+
     const clientMessageId = uuidv4()
     const assetIds = sentAttachments.map(({ id }) => id)
     composer.retainAssets(pendingAssetOwnerKey(clientMessageId), assetIds)
@@ -187,25 +196,65 @@ export function useAgentDraftSubmission(
       starterPrompt
     }
     const gateId = composer.startGateHold(clientMessageId, snapshot)
-    const gateRevision = composer.draftRevision
+    return {
+      clientMessageId,
+      gateId,
+      gateRevision: composer.draftRevision,
+      snapshot,
+      sentAttachments,
+      sentReferences,
+      nodes,
+      inputMethod,
+      starterPrompt
+    }
+  }
 
+  function settleSubmissionOutcome(
+    outcome: DraftSendOutcome,
+    staged: ReturnType<typeof stageSubmission>
+  ): void {
+    composer.releaseGateHold(staged.gateId)
+    if (outcome === 'withdrawn') {
+      withdrawSubmission(
+        staged.clientMessageId,
+        staged.snapshot,
+        staged.gateRevision
+      )
+      return
+    }
+    if (!conversation.getPendingSend(staged.clientMessageId)) {
+      composer.releaseRetainedAssets(
+        pendingAssetOwnerKey(staged.clientMessageId)
+      )
+      return
+    }
+    composer.releaseUnusedAssets()
+  }
+
+  async function submit(
+    text: string,
+    attachments: ComposerAttachment[],
+    references: WorkflowReference[] = []
+  ): Promise<void> {
+    const target = validateSubmissionTarget(text, attachments)
+    if (target === null) return
+    const staged = stageSubmission(text, attachments, references, target)
     let outcome: DraftSendOutcome = 'failed'
     try {
       outcome = await options.send(
         text,
-        sentAttachments,
-        nodes,
-        sentReferences,
-        { clientMessageId, inputMethod, starterPrompt },
-        () => composer.releaseGateHold(gateId)
+        staged.sentAttachments,
+        staged.nodes,
+        staged.sentReferences,
+        {
+          clientMessageId: staged.clientMessageId,
+          inputMethod: staged.inputMethod,
+          starterPrompt: staged.starterPrompt
+        },
+        () => composer.releaseGateHold(staged.gateId)
       )
     } finally {
-      composer.releaseGateHold(gateId)
-      if (outcome === 'withdrawn')
-        withdrawSubmission(clientMessageId, snapshot, gateRevision)
-      else if (!conversation.getPendingSend(clientMessageId))
-        composer.releaseRetainedAssets(pendingAssetOwnerKey(clientMessageId))
-      else composer.releaseUnusedAssets()
+      settleSubmissionOutcome(outcome, staged)
     }
   }
 
