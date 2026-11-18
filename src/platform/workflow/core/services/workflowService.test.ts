@@ -4059,6 +4059,19 @@ describe('useWorkflowService', () => {
   })
 
   describe('renameWorkflow', () => {
+    it('reports a refused rename and leaves the workflow in place', async () => {
+      const workflowStore = useWorkflowStore()
+      const service = useWorkflowService()
+      const workflow = createModeTestWorkflow({ path: 'workflows/a.json' })
+      vi.spyOn(workflowStore, 'renameWorkflow').mockResolvedValue(false)
+
+      const renamed = await service.renameWorkflow(workflow, 'workflows/b.json')
+
+      expect(renamed).toBe(false)
+      expect(workflow.path).toBe('workflows/a.json')
+      expect(useToast().error).toHaveBeenCalled()
+    })
+
     it('keeps run errors attached to a renamed workflow', async () => {
       const workflowStore = useWorkflowStore()
       const service = useWorkflowService()
@@ -4077,6 +4090,7 @@ describe('useWorkflowService', () => {
       vi.spyOn(workflowStore, 'renameWorkflow').mockImplementation(
         async (renamedWorkflow, path) => {
           renamedWorkflow.updatePath(path)
+          return true
         }
       )
       executionErrorStore.setActiveGraph(graphId, oldPath)
@@ -4102,7 +4116,7 @@ describe('useWorkflowService', () => {
       workflowStore = useWorkflowStore()
       service = useWorkflowService()
       vi.spyOn(workflowStore, 'saveWorkflow').mockResolvedValue()
-      vi.spyOn(workflowStore, 'renameWorkflow').mockResolvedValue()
+      vi.spyOn(workflowStore, 'renameWorkflow').mockResolvedValue(true)
       app.rootGraph.extra = {}
     })
 
@@ -4513,7 +4527,7 @@ describe('useWorkflowService', () => {
       workflowStore = useWorkflowStore()
       service = useWorkflowService()
       vi.spyOn(workflowStore, 'saveWorkflow').mockResolvedValue()
-      vi.spyOn(workflowStore, 'renameWorkflow').mockResolvedValue()
+      vi.spyOn(workflowStore, 'renameWorkflow').mockResolvedValue(true)
     })
 
     function createSaveableWorkflow(path: string): LoadedComfyWorkflow {
