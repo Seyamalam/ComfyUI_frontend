@@ -4427,5 +4427,53 @@ describe('useAgentConversationStore', () => {
         { workflowId: 'wf-live', opIds: ['op-live'], isLive: true }
       ])
     })
+
+    it('tracks per-tab blank chat ids and discards only failed pending sends for an origin', () => {
+      const store = useAgentConversationStore()
+      store.setActiveBlankChatId('blank:tab-a')
+      expect(store.activeBlankChatId).toBe('blank:tab-a')
+      expect(store.currentOrigin()).toEqual({
+        kind: 'blank',
+        blankChatId: 'blank:tab-a'
+      })
+
+      store.startPendingSend({
+        clientMessageId: 'cm-sending',
+        text: 'still sending',
+        attachments: [],
+        tags: [],
+        workflowReferences: []
+      })
+      store.startPendingSend({
+        clientMessageId: 'cm-failed',
+        text: 'failed',
+        attachments: [],
+        tags: [],
+        workflowReferences: []
+      })
+      store.failPendingSend('cm-failed', {
+        kind: 'network',
+        message: 'offline'
+      })
+
+      expect(
+        store.hasPendingSendForOrigin({
+          kind: 'blank',
+          blankChatId: 'blank:tab-a'
+        })
+      ).toBe(true)
+      expect(
+        store.discardFailedPendingSends({
+          kind: 'blank',
+          blankChatId: 'blank:tab-a'
+        })
+      ).toEqual(['cm-failed'])
+      expect(store.getPendingSend('cm-failed')).toBeUndefined()
+      expect(store.getPendingSend('cm-sending')).toBeDefined()
+
+      store.reset('blank:tab-b')
+      expect(store.activeBlankChatId).toBe('blank:tab-b')
+      expect(store.entries).toEqual([])
+    })
   })
 })
