@@ -593,6 +593,16 @@ export const useExecutionStore = defineStore('execution', () => {
     return resolveWorkflowOwnership(jobId, workflowId).owned
   }
 
+  function rememberStampAndCheckOutputOwner(
+    jobId: JobId | undefined,
+    workflowId?: string
+  ): boolean {
+    if (!jobId) return false
+    rememberStampedWorkflowId(jobId, workflowId)
+    const { owned, leg } = resolveWorkflowOwnership(jobId, workflowId)
+    return owned && leg !== 'active-job'
+  }
+
   function handleExecutionStart(e: CustomEvent<ExecutionStartWsMessage>) {
     const jobId = e.detail.prompt_id
     queuedJobs.value[jobId] ??= { nodes: {} }
@@ -1287,6 +1297,7 @@ export const useExecutionStore = defineStore('execution', () => {
   function registerJobWorkflowIdMapping(jobId: JobId, workflowId: WorkflowId) {
     if (!jobId || !workflowId) return
     jobIdToWorkflowId.value.set(jobId, workflowId)
+    rememberStampedWorkflowId(jobId, workflowId)
     flushPendingExecutionError(jobId)
     flushPendingSkippedOutputs(jobId)
   }
@@ -1365,6 +1376,7 @@ export const useExecutionStore = defineStore('execution', () => {
     runningWorkflowCount,
     initializingJobIds,
     rememberStampAndCheckActiveWorkflow,
+    rememberStampAndCheckOutputOwner,
     isActiveWorkflowRunning,
     isJobInitializing,
     clearInitializationByJobId,
