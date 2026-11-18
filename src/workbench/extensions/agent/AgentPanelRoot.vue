@@ -17,6 +17,7 @@ import {
   ref,
   watch
 } from 'vue'
+import { v4 as uuidv4 } from 'uuid'
 import { useI18n } from 'vue-i18n'
 
 import { useCurrentUser } from '@/composables/auth/useCurrentUser'
@@ -148,7 +149,10 @@ import {
   trackAgentError,
   useAgentSession
 } from './composables/agent/useAgentSession'
-import { useAgentDraftSubmission } from './composables/agent/useAgentDraftSubmission'
+import {
+  pendingAssetOwnerKey,
+  useAgentDraftSubmission
+} from './composables/agent/useAgentDraftSubmission'
 import { useAgentSendGates } from './composables/agent/useAgentSendGates'
 import type { CoachHoldEnd } from './composables/agent/useAgentSendGates'
 import { useAgentWorkflowTabBindingStore } from './stores/agent/agentWorkflowTabBindingStore'
@@ -333,14 +337,24 @@ watch(
     // still renders, an owner still gets the fallback Add credits CTA, and its
     // click is still reported, so the funnel saw CTAs with no impression.
     capabilityReadSettled.value
-      ? conversationMessages.value
-          .filter((message) => message.parts.some(isCreditsStopPart))
-          .map((message) => ({
-            id: message.id,
-            surface: message.parts.some((part) => part.type === 'paywall')
-              ? ('refused_send' as const)
-              : ('credits_exhausted' as const)
-          }))
+      ? [
+          ...conversationMessages.value
+            .filter((message) => message.parts.some(isCreditsStopPart))
+            .map((message) => ({
+              id: message.id,
+              surface: message.parts.some((part) => part.type === 'paywall')
+                ? ('refused_send' as const)
+                : ('credits_exhausted' as const)
+            })),
+          ...conversationEntries.value.flatMap((entry) =>
+            entry.role === 'user' &&
+            entry.pending?.status === 'failed' &&
+            entry.pending.failure?.kind === 'paywall' &&
+            !entry.pending.paywallResolved
+              ? [{ id: entry.id, surface: 'refused_send' as const }]
+              : []
+          )
+        ]
       : [],
   (creditsStops) => {
     const telemetry = useTelemetry()
@@ -406,8 +420,12 @@ const creditsExhausted = computed(() => {
 const unresolvedPaywallPending = computed(() =>
   conversationEntries.value.some(
     (entry) =>
-      entry.role === 'assistant' &&
-      entry.parts.some((part) => part.type === 'paywall')
+      (entry.role === 'assistant' &&
+        entry.parts.some((part) => part.type === 'paywall')) ||
+      (entry.role === 'user' &&
+        entry.pending?.status === 'failed' &&
+        entry.pending.failure?.kind === 'paywall' &&
+        !entry.pending.paywallResolved)
   )
 )
 
@@ -418,9 +436,13 @@ const unresolvedPaywallPending = computed(() =>
  */
 const latestEntryHasPaywall = computed(() => {
   const latestEntry = conversationEntries.value.at(-1)
+  if (!latestEntry) return false
+  if (latestEntry.role === 'assistant')
+    return latestEntry.parts.some(isCreditsStopPart)
   return (
-    latestEntry?.role === 'assistant' &&
-    latestEntry.parts.some(isCreditsStopPart)
+    latestEntry.pending?.status === 'failed' &&
+    latestEntry.pending.failure?.kind === 'paywall' &&
+    !latestEntry.pending.paywallResolved
   )
 })
 const threadHasUserMessage = computed(() =>
@@ -528,6 +550,11 @@ const workflowStore = useWorkflowStore()
 const workflowService = useWorkflowService()
 const bindingStore = useAgentWorkflowTabBindingStore()
 const composerStore = useAgentComposerStore()
+onBeforeUnmount(
+  composerStore.onAssetPreviewUpdated(({ id, previewUrl }) =>
+    conversationStore.updatePendingAttachmentPreview(id, previewUrl)
+  ).off
+)
 const { selectedWorkflow: selectedTarget } = storeToRefs(agentPanelStore)
 const { dismissedSelectionSignature, enabled: agentEnabled } =
   storeToRefs(agentPanelStore)
@@ -1823,8 +1850,9 @@ onBeforeUnmount(() => {
           outcome: 'dropped',
           reason: 'panel_closed'
         })
-        const cancelledId = composerStore.cancelGateHold()
-        if (cancelledId !== null) withdrawSubmission(cancelledId)
+        const cancelled = composerStore.cancelGateHold()
+        if (cancelled !== null)
+          withdrawSubmission(cancelled.clientMessageId, cancelled.snapshot)
       }
     },
     detachDocOpMinter: () => {
@@ -2052,8 +2080,9 @@ async function onSelectHistory(
   provisionalTitle.value = undefined
   if (currentChatReady.value && id === threadId.value)
     return onShowTarget(isCurrent, warnRestoreFailed)
-  const cancelledId = composerStore.cancelGateHold()
-  if (cancelledId !== null) withdrawSubmission(cancelledId)
+  const cancelled = composerStore.cancelGateHold()
+  if (cancelled !== null)
+    withdrawSubmission(cancelled.clientMessageId, cancelled.snapshot)
   errorAttachRun++
   composerStore.clearErrorContext()
   cancelWorkflowSelection()
@@ -2321,16 +2350,103 @@ const { submit: onSend, withdrawSubmission } = useAgentDraftSubmission({
   }
 })
 
+function onDeletePendingSend(clientMessageId: string): void {
+  conversationStore.takePendingSend(clientMessageId)
+  composerStore.releaseRetainedAssets(pendingAssetOwnerKey(clientMessageId))
+}
+
+async function onRetryPendingSend(clientMessageId: string): Promise<void> {
+  const pending = conversationStore.getPendingSend(clientMessageId)
+  if (!pending || pending.status !== 'failed') return
+  const kind = pending.failure?.kind
+  if (kind === 'disowned' || kind === 'target_unavailable') return
+  if (
+    kind === 'retry_after' &&
+    pending.failure?.retryAtMs !== undefined &&
+    pending.failure.retryAtMs > Date.now()
+  )
+    return
+  if (
+    workflowSelecting.value ||
+    conversationStore.hasSendingForOrigin(pending.origin)
+  )
+    return
+  if (!hasAgentCredential() && !(await ensureSignedIn())) return
+
+  const retryClientMessageId = uuidv4()
+  const retried = conversationStore.retryPendingSend(
+    clientMessageId,
+    retryClientMessageId
+  )
+  if (!retried) return
+  composerStore.transferRetainedAssets(
+    pendingAssetOwnerKey(clientMessageId),
+    pendingAssetOwnerKey(retryClientMessageId)
+  )
+
+  const turnOrigin: TurnOrigin = retried.targetTabPath
+    ? { tabPath: retried.targetTabPath }
+    : null
+  const originContext = targetWorkflowTurnContext(turnOrigin)
+  pendingTelemetry.set(retryClientMessageId, {
+    metadata: {
+      attachment_count: retried.sentAttachments.length,
+      node_tag_count: retried.sentTags.length,
+      thread_id:
+        retried.origin.kind === 'thread' ? retried.origin.threadId : null,
+      workflow_id: originContext?.id ?? null,
+      client_message_id: retryClientMessageId,
+      input_method: retried.inputMethod ?? 'typed',
+      starter_prompt_id: retried.starterPrompt?.id ?? null,
+      starter_prompt_click_id: retried.starterPrompt?.clickId ?? null
+    },
+    origin: turnOrigin
+  })
+  const selectionWorkflow = retried.targetTabPath
+    ? originWorkflow({ tabPath: retried.targetTabPath })
+    : undefined
+  const sentUsageScope = proactive.scope.value
+  try {
+    await sendWithFundsRecheck((onAccepted) =>
+      sendMessage(
+        retried.rawText,
+        retried.sentAttachments,
+        retried.sentTags,
+        retried.workflowReferences,
+        () => (selectionWorkflow ? cloudIdFor(selectionWorkflow) : undefined),
+        retryClientMessageId,
+        () => {
+          proactive.accepted(sentUsageScope)
+          onAccepted()
+        },
+        retried.targetTabPath ?? null
+      )
+    )
+  } finally {
+    if (proactive.scope.value === sentUsageScope) void proactive.refresh()
+    reportPendingSend(retryClientMessageId)
+    if (!conversationStore.getPendingSend(retryClientMessageId))
+      composerStore.releaseRetainedAssets(
+        pendingAssetOwnerKey(retryClientMessageId)
+      )
+  }
+}
+
 function onStop(method: AgentStopMethod): void {
   const held = composerStore.gateHold
   if (held !== null) {
-    composerStore.cancelGateHold()
+    const cancelled = composerStore.cancelGateHold()
     if (sendHeldByCoach.value)
       releaseCoachCompletionWaiters(
         { outcome: 'released', reason: 'elsewhere' },
         false
       )
-    withdrawSubmission(held.clientMessageId, held.revision)
+    if (cancelled !== null)
+      withdrawSubmission(
+        cancelled.clientMessageId,
+        cancelled.snapshot,
+        cancelled.revision
+      )
     return
   }
   void stopTurn(method)
@@ -2364,8 +2480,9 @@ function onNewChat(
     return
   }
   provisionalTitle.value = undefined
-  const cancelledId = composerStore.cancelGateHold()
-  if (cancelledId !== null) withdrawSubmission(cancelledId)
+  const cancelled = composerStore.cancelGateHold()
+  if (cancelled !== null)
+    withdrawSubmission(cancelled.clientMessageId, cancelled.snapshot)
   cancelWorkflowSelection()
   canvasStore.stopNodePicking()
   attachment.cancelAllUploads()
@@ -2779,6 +2896,8 @@ onMounted(() => agentPanelRenderStore.reach('drawn'))
       @open-reference-workflow="onNavigateToReferenceWorkflow"
       @show-target="onShowTarget"
       @paywall-action="onPaywallAction"
+      @retry-pending="onRetryPendingSend"
+      @delete-pending="onDeletePendingSend"
       @standing-paywall-shown="onStandingPaywallShown"
       @retry-sync="retrySubscription"
       @new-chat="onNewChat"

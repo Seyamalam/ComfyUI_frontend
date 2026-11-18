@@ -7,7 +7,6 @@ import {
   StorageKeys
 } from '@/platform/workflow/persistence/base/storageKeys'
 
-import { useAgentConversationStore } from './agentConversationStore'
 import { useAgentComposerStore } from './agentComposerStore'
 
 describe('composer reference ownership', () => {
@@ -36,7 +35,7 @@ describe('composer reference ownership', () => {
     const id = store.startGateHold('cm-1')
     store.resolveSkillMetadata(resolved)
     expect(store.prompt).toEqual({ text: '', references: [] })
-    expect(store.cancelGateHold()).toBe('cm-1')
+    expect(store.cancelGateHold()?.clientMessageId).toBe('cm-1')
     store.releaseGateHold(id)
     store.restorePrompt(snapshot.prompt, snapshot.attachments)
     store.resolveSkillMetadata(resolved)
@@ -71,9 +70,8 @@ describe('composer reference ownership', () => {
     expect(store.prompt).toEqual({ text: 'Keep this', references: [workflow] })
   })
 
-  it('releases obsolete previews while retaining assets held by the current tray or a pending send', () => {
+  it('releases obsolete previews while retaining assets explicitly retained by an owner key', () => {
     const store = useAgentComposerStore()
-    const conversation = useAgentConversationStore()
     const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
     const retained = {
       id: 'retained',
@@ -88,23 +86,11 @@ describe('composer reference ownership', () => {
       previewUrl: 'blob:old'
     })
     store.addAttachment(retained)
-    conversation.startPendingSend({
-      clientMessageId: 'cm-1',
-      text: '',
-      attachments: [],
-      tags: [],
-      workflowReferences: [],
-      prompt: store.prompt,
-      composerAttachments: [...store.attachments],
-      composerNodes: [],
-      target: null,
-      promptOrigin: 'typed',
-      starterPrompt: null
-    })
+    store.retainAssets('pending:cm-1', ['old', 'retained'])
     const gateId = store.startGateHold('cm-1')
     store.restorePrompt({ text: 'New draft', references: [] }, [retained])
-    conversation.takePendingSend('cm-1')
-    expect(store.cancelGateHold()).toBe('cm-1')
+    store.releaseRetainedAssets('pending:cm-1')
+    expect(store.cancelGateHold()?.clientMessageId).toBe('cm-1')
     expect(store.cancelGateHold()).toBeNull()
     store.releaseGateHold(gateId)
     store.releaseUnusedAssets()
@@ -113,7 +99,6 @@ describe('composer reference ownership', () => {
     expect(store.draft).toBe('New draft')
     expect(store.referenceAttachment('old')).toBe(false)
     expect(store.referenceAttachment('retained')).toBe(true)
-    expect(conversation.pendingAttachmentIds().size).toBe(0)
   })
 
   it('keeps every asset occurrence and updates all of them after upload', () => {
