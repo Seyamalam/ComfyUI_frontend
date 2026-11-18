@@ -90,6 +90,7 @@ const ANSWER_ASK_TIMEOUT_MS = 15_000
 type AgentApiOperation =
   | 'answer_thread_ask'
   | 'cancel_thread_message'
+  | 'delete_thread'
   | 'get_agent_identity'
   | 'get_usage_status'
   | 'get_cloud_workflow'
@@ -642,13 +643,11 @@ export function createAgentRestClient() {
     return apiError
   }
 
-  async function requestResult<T>(
+  async function fetchAuthorized(
     operation: AgentApiOperation,
     route: string,
-    init: Parameters<typeof api.fetchApi>[1],
-    schema: z.ZodType<T>,
-    treatBodyFailureAsUnreadable = false
-  ): Promise<RequestResult<T>> {
+    init: Parameters<typeof api.fetchApi>[1]
+  ): Promise<RequestResult<Response>> {
     let authScheme: ReportedAuthScheme = 'unreported'
     let credential: ReportedAuthCredential = 'unreported'
     let response: Response
@@ -684,9 +683,21 @@ export function createAgentRestClient() {
         return { ok: false, cause }
       }
     }
+    return { ok: true, value: response }
+  }
+
+  async function requestResult<T>(
+    operation: AgentApiOperation,
+    route: string,
+    init: Parameters<typeof api.fetchApi>[1],
+    schema: z.ZodType<T>,
+    treatBodyFailureAsUnreadable = false
+  ): Promise<RequestResult<T>> {
+    const responseResult = await fetchAuthorized(operation, route, init)
+    if (!responseResult.ok) return responseResult
     let payload: unknown
     try {
-      payload = await response.json()
+      payload = await responseResult.value.json()
     } catch (cause) {
       return {
         ok: false,
@@ -700,6 +711,16 @@ export function createAgentRestClient() {
     return parsed.success
       ? { ok: true, value: parsed.data }
       : { ok: false, cause: parsed.error }
+  }
+
+  async function requestEmpty(
+    operation: AgentApiOperation,
+    route: string,
+    init: Parameters<typeof api.fetchApi>[1]
+  ): Promise<void> {
+    const responseResult = await fetchAuthorized(operation, route, init)
+    if (!responseResult.ok)
+      throw rememberAgentRequestFailure(responseResult.cause, route)
   }
 
   async function request<T>(
@@ -955,6 +976,14 @@ export function createAgentRestClient() {
     )
   }
 
+  async function deleteThread(threadId: string): Promise<void> {
+    await requestEmpty(
+      'delete_thread',
+      `/agent/threads/${encodeURIComponent(threadId)}`,
+      { method: 'DELETE' }
+    )
+  }
+
   async function refreshCredential(): Promise<void> {
     await request(
       'refresh_credential',
@@ -996,6 +1025,7 @@ export function createAgentRestClient() {
     getCloudWorkflow,
     cancelMessage,
     answerAsk,
+    deleteThread,
     refreshCredential,
     uploadImage
   }

@@ -449,6 +449,7 @@ export const useAgentPanelStore = defineStore('agentPanel', () => {
     startFollowingVisibleWorkflow,
     selectedWorkflow,
     targetUnavailable,
+    isRetainedTarget,
     markWorkflowTargetUnavailable,
     canRestoreWorkflow,
     beginWorkflowRestoration,
