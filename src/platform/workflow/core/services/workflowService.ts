@@ -554,8 +554,19 @@ export const useWorkflowService = () => {
   /**
    * Load the default workflow
    */
-  const loadDefaultWorkflow = () =>
-    queueWorkflowLoad(() => useApp().loadGraphData(getDefaultWorkflow()))
+  const loadDefaultWorkflow = async (options: { initiator?: 'user' } = {}) => {
+    const loaded = await queueWorkflowLoad(() =>
+      useApp().loadGraphData(getDefaultWorkflow())
+    )
+    const activatedWorkflow = typeof loaded === 'object' ? loaded : undefined
+    if (
+      options.initiator === 'user' &&
+      activatedWorkflow !== undefined &&
+      workflowStore.isActive(activatedWorkflow)
+    )
+      workflowStore.reportUserActivation(activatedWorkflow)
+    return loaded
+  }
 
   /**
    * Load a blank workflow
@@ -1311,7 +1322,10 @@ export const useWorkflowService = () => {
   /**
    * Takes an existing workflow and duplicates it with a new name
    */
-  const duplicateWorkflow = async (workflow: ComfyWorkflow) => {
+  const duplicateWorkflow = async (
+    workflow: ComfyWorkflow,
+    options: { initiator?: 'user' } = {}
+  ) => {
     if (!workflow.isLoaded) await workflow.load()
     const state = JSON.parse(JSON.stringify(workflow.activeState))
     // Ensure duplicates are always treated as distinct workflows.
@@ -1324,9 +1338,16 @@ export const useWorkflowService = () => {
       state
     )
 
-    await queueWorkflowLoad(() =>
+    const loaded = await queueWorkflowLoad(() =>
       useApp().loadGraphData(state, true, true, duplicate)
     )
+    const activatedWorkflow = typeof loaded === 'object' ? loaded : undefined
+    if (
+      options.initiator === 'user' &&
+      activatedWorkflow !== undefined &&
+      workflowStore.isActive(activatedWorkflow)
+    )
+      workflowStore.reportUserActivation(activatedWorkflow)
   }
 
   /**
