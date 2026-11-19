@@ -1991,7 +1991,11 @@ export function useAgentSession(deps: AgentSessionDeps) {
     const resolutionStillPending =
       conversationStore.submittedAskAnswer(askId) !== undefined
     if (resolutionStillPending)
-      reportAcceptedRecoveredAnswer(askId, channelDropped)
+      reportAcceptedRecoveredAnswer(
+        askId,
+        channelDropped,
+        conversationStore.threadId === currentThreadId
+      )
     recordDeliveredAsk(askId)
     conversationStore.commitAsk(askId, currentThreadId, { status: 'retired' })
     if (resolutionStillPending && !channelDropped) {
@@ -2186,7 +2190,8 @@ export function useAgentSession(deps: AgentSessionDeps) {
       surface: 'agent',
       errorType: 'agent_ask_answer_unconfirmed'
     })
-    pushError(i18n.global.t('agent.runApproval.answerUncertain'))
+    if (conversationStore.threadId === threadId)
+      pushError(i18n.global.t('agent.runApproval.answerUncertain'))
   }
 
   function reportSupersededAnswer(
@@ -2516,7 +2521,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
     if (connection === 'dropped') return
     connection = 'dropped'
     resolutionChannelEpoch += 1
-    for (const awaiting of conversationStore.asksAwaitingResolution())
+    for (const awaiting of conversationStore.asksAwaitingResolution()) {
       if (awaiting.kind === 'accepted')
         reportAcceptedRecoveredAnswer(
           awaiting.askId,
@@ -2528,6 +2533,8 @@ export function useAgentSession(deps: AgentSessionDeps) {
           awaiting.askId,
           awaiting.owner === conversationStore.threadId
         )
+      conversationStore.completeAskResolutionReport(awaiting.askId)
+    }
   }
 
   function reconcileLiveTurns(cause: RecoveryCause): void {
@@ -2752,9 +2759,11 @@ export function useAgentSession(deps: AgentSessionDeps) {
       deliveredAtRecoveryStart,
       snapshotNamedDeliveredAsks: new Set(),
       deliveredAsksAwaitingSnapshot: new Set(
-        [...deliveredAtRecoveryStart].filter(
-          (askId) => !previousObservation?.deliveredAskIds.has(askId)
-        )
+        previousObservation === undefined
+          ? []
+          : [...deliveredAtRecoveryStart].filter(
+              (askId) => !previousObservation.deliveredAskIds.has(askId)
+            )
       ),
       consumedSnapshotProtection: new Set()
     }
@@ -2820,7 +2829,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
     const pendingAskConfirmed =
       state.previousObservation !== undefined &&
       state.previousObservation.pendingAskId === pendingAskId
-    trackDeliveredAsksAwaitingSnapshot(state, pendingAskId, pendingAskConfirmed)
+    trackDeliveredAsksAwaitingSnapshot(state, pendingAskId)
     state.hasUnconfirmedObservation = !pendingAskConfirmed
     reconcileStreamingApproval(
       turn,
@@ -2829,6 +2838,8 @@ export function useAgentSession(deps: AgentSessionDeps) {
       pendingAskConfirmed,
       state.deliveredAsksAwaitingSnapshot
     )
+    if (pendingAskConfirmed)
+      consumeDeliveredAskSnapshotProtection(state, pendingAskId)
     state.previousObservation = recordPendingAskObservation(
       key,
       pendingAskId,
@@ -2839,19 +2850,12 @@ export function useAgentSession(deps: AgentSessionDeps) {
 
   function trackDeliveredAsksAwaitingSnapshot(
     state: RecoveryObservationState,
-    pendingAskId: string | undefined,
-    pendingAskConfirmed: boolean
+    pendingAskId: string | undefined
   ): void {
     if (pendingAskId !== undefined) {
       state.snapshotNamedDeliveredAsks.add(pendingAskId)
       state.deliveredAsksAwaitingSnapshot.delete(pendingAskId)
     }
-    if (pendingAskConfirmed)
-      for (const askId of state.deliveredAsksAwaitingSnapshot)
-        if (askId !== pendingAskId) {
-          state.deliveredAsksAwaitingSnapshot.delete(askId)
-          state.consumedSnapshotProtection.add(askId)
-        }
     for (const askId of deliveredAsks)
       if (
         !state.deliveredAtRecoveryStart.has(askId) &&
@@ -2859,6 +2863,17 @@ export function useAgentSession(deps: AgentSessionDeps) {
         !state.consumedSnapshotProtection.has(askId)
       )
         state.deliveredAsksAwaitingSnapshot.add(askId)
+  }
+
+  function consumeDeliveredAskSnapshotProtection(
+    state: RecoveryObservationState,
+    pendingAskId: string | undefined
+  ): void {
+    for (const askId of state.deliveredAsksAwaitingSnapshot)
+      if (askId !== pendingAskId) {
+        state.deliveredAsksAwaitingSnapshot.delete(askId)
+        state.consumedSnapshotProtection.add(askId)
+      }
   }
 
   function nextThreadMissingCount(
