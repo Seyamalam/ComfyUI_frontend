@@ -1206,8 +1206,13 @@ const {
     activeTab: enqueueActiveTab,
     draft: targetWorkflowDraft,
     turnTab: (origin, workflowId) => turnTabForOrigin(origin, workflowId),
-    canvasSelection: () =>
-      canReferenceNodes.value ? selectedNodes.value.map((node) => node.id) : []
+    canvasSelection: (origin) =>
+      canReferenceNodes.value &&
+      (origin === undefined ||
+        (origin !== null &&
+          workflowStore.activeWorkflow?.path === origin.tabPath))
+        ? selectedNodes.value.map((node) => node.id)
+        : []
   }
 })
 
@@ -1858,7 +1863,11 @@ onBeforeUnmount(() => {
         })
         const cancelled = composerStore.cancelGateHold()
         if (cancelled !== null)
-          withdrawSubmission(cancelled.clientMessageId, cancelled.snapshot)
+          withdrawSubmission(
+            cancelled.clientMessageId,
+            cancelled.snapshot,
+            cancelled.revision
+          )
       }
     },
     detachDocOpMinter: () => {
@@ -2088,7 +2097,11 @@ async function onSelectHistory(
     return onShowTarget(isCurrent, warnRestoreFailed)
   const cancelled = composerStore.cancelGateHold()
   if (cancelled !== null)
-    withdrawSubmission(cancelled.clientMessageId, cancelled.snapshot)
+    withdrawSubmission(
+      cancelled.clientMessageId,
+      cancelled.snapshot,
+      cancelled.revision
+    )
   errorAttachRun++
   composerStore.clearErrorContext()
   cancelWorkflowSelection()
@@ -2297,7 +2310,15 @@ const { submit: onSend, withdrawSubmission } = useAgentDraftSubmission({
     exit: canvasStore.stopNodePicking
   },
   // fallow-ignore-next-line complexity -- Existing PR logic; this lane changes only the composing panel test.
-  send: async (text, attachments, nodes, references, meta, releaseGate) => {
+  send: async (
+    text,
+    attachments,
+    nodes,
+    references,
+    meta,
+    releaseGate,
+    stagedTarget
+  ) => {
     const submissionId = composerStore.gateHold?.id
     if (
       !consentAccepted.value &&
@@ -2314,6 +2335,11 @@ const { submit: onSend, withdrawSubmission } = useAgentDraftSubmission({
       )
         return 'withdrawn'
     }
+    if (
+      nodes.length > 0 &&
+      selectedTarget.value?.instanceId !== stagedTarget.instanceId
+    )
+      return 'withdrawn'
 
     const originContext = targetWorkflowTurnContext()
     pendingTelemetry.set(meta.clientMessageId, {
@@ -2331,7 +2357,8 @@ const { submit: onSend, withdrawSubmission } = useAgentDraftSubmission({
         originContext === undefined ? null : { tabPath: originContext.tabPath }
     })
     releaseGate()
-    const selectionWorkflow = selectedTarget.value
+    const selectionWorkflow =
+      nodes.length > 0 ? stagedTarget : selectedTarget.value
     const sentUsageScope = proactive.scope.value
     try {
       const sent = await sendWithFundsRecheck((onAccepted) =>
@@ -2377,7 +2404,8 @@ function retryablePendingSend(clientMessageId: string) {
   if (!canRetryPendingFailure(pending.failure)) return null
   if (
     workflowSelecting.value ||
-    conversationStore.hasSendingForOrigin(pending.origin)
+    conversationStore.hasSendingForOrigin(pending.origin) ||
+    conversationStore.hasLiveTurnForOrigin(pending.origin)
   )
     return null
   return pending
@@ -2942,6 +2970,7 @@ onMounted(() => agentPanelRenderStore.reach('drawn'))
         crdtStatus.terminal === 'retry_exhausted' ||
         crdtStatus.terminal === 'timeout'
       "
+      :retry-blocked="workflowSelecting"
       :free-use-placement="freeUsePlacement"
       @free-use-notice="onFreeUseNotice"
       @send="onSend"
