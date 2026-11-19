@@ -252,27 +252,31 @@ function isMeshModelFile(file: File): boolean {
 
 const dropActivationCollector = Symbol('dropActivationCollector')
 
-interface HandleFileOptions {
-  deferWarnings?: boolean
-  onNodeCreated?: (node: LGraphNode) => void
+interface GraphActivationOptions {
   initiator?: 'user'
   [dropActivationCollector]?: (workflow: ComfyWorkflow) => void
 }
 
-function reportActiveWorkflowIfCurrent(workflow: ComfyWorkflow | undefined) {
-  if (workflow !== undefined && useWorkflowStore().isActive(workflow)) {
-    useWorkflowStore().reportUserActivation(workflow)
+interface HandleFileOptions extends GraphActivationOptions {
+  deferWarnings?: boolean
+  onNodeCreated?: (node: LGraphNode) => void
+}
+
+function reportActiveWorkflowIfCurrent(
+  workflow: ComfyWorkflow | null | undefined
+) {
+  if (!workflow) return
+  const workflowStore = useWorkflowStore()
+  if (workflowStore.isActive(workflow)) {
+    workflowStore.reportUserActivation(workflow)
   }
 }
 
 function reportUserGraphActivation(
-  workflow: ComfyWorkflow | undefined,
-  options?: {
-    initiator?: 'user'
-    [dropActivationCollector]?: (workflow: ComfyWorkflow) => void
-  }
+  workflow: ComfyWorkflow | null | undefined,
+  options?: GraphActivationOptions
 ) {
-  if (workflow === undefined) return
+  if (!workflow) return
   const collect = options?.[dropActivationCollector]
   if (collect) {
     collect(workflow)
@@ -283,7 +287,7 @@ function reportUserGraphActivation(
   }
 }
 
-function forwardActivationOptions(options?: HandleFileOptions) {
+function forwardActivationOptions(options?: GraphActivationOptions) {
   const collect = options?.[dropActivationCollector]
   return {
     ...(options?.initiator && { initiator: options.initiator }),
@@ -1254,7 +1258,7 @@ export class ComfyApp implements IComfyApp {
     clean: boolean = true,
     restore_view: boolean = true,
     workflow: string | null | ComfyWorkflow = null,
-    options: LoadGraphDataOptions = {}
+    options: LoadGraphDataOptions & GraphActivationOptions = {}
   ): Promise<LoadedComfyWorkflow | boolean | undefined> {
     return this.enqueueGraphLoad(async () =>
       options.isCurrent?.() === false || options.isReady?.() === false
@@ -1274,7 +1278,7 @@ export class ComfyApp implements IComfyApp {
     clean: boolean,
     restore_view: boolean,
     workflow: string | null | ComfyWorkflow,
-    options: LoadGraphDataOptions
+    options: LoadGraphDataOptions & GraphActivationOptions
   ): Promise<LoadedComfyWorkflow | boolean | undefined> {
     const canvasScheduler = useCanvasScheduler()
     const loadId = ++this.graphLoadSequence
@@ -2412,8 +2416,7 @@ export class ComfyApp implements IComfyApp {
             fileName,
             this.rootGraph.serialize() as unknown as ComfyWorkflowJSON
           )
-          const activatedWorkflow =
-            useWorkflowStore().activeWorkflow ?? undefined
+          const activatedWorkflow = useWorkflowStore().activeWorkflow
           await useExtensionService().invokeExtensionsAsync('afterLoadGraph')
           reportUserGraphActivation(activatedWorkflow, options)
           return
@@ -2554,11 +2557,7 @@ export class ComfyApp implements IComfyApp {
   async loadApiJson(
     apiData: ComfyApiWorkflow,
     fileName: string,
-    options: {
-      deferWarnings?: boolean
-      initiator?: 'user'
-      [dropActivationCollector]?: (workflow: ComfyWorkflow) => void
-    } = {}
+    options: GraphActivationOptions & { deferWarnings?: boolean } = {}
   ): Promise<void | false> {
     return this.enqueueGraphLoad(() =>
       this.loadApiJsonNow(apiData, fileName, options)
@@ -2568,11 +2567,7 @@ export class ComfyApp implements IComfyApp {
   private async loadApiJsonNow(
     apiData: ComfyApiWorkflow,
     fileName: string,
-    options: {
-      deferWarnings?: boolean
-      initiator?: 'user'
-      [dropActivationCollector]?: (workflow: ComfyWorkflow) => void
-    }
+    options: GraphActivationOptions & { deferWarnings?: boolean }
   ): Promise<void> {
     let lifecycleStarted = false
     let lifecycleCompleted = false
@@ -2784,7 +2779,7 @@ export class ComfyApp implements IComfyApp {
         fileName,
         this.rootGraph.serialize() as unknown as ComfyWorkflowJSON
       )
-      const activatedWorkflow = useWorkflowStore().activeWorkflow ?? undefined
+      const activatedWorkflow = useWorkflowStore().activeWorkflow
       await useExtensionService().invokeExtensionsAsync('afterLoadGraph')
       reportUserGraphActivation(activatedWorkflow, options)
       lifecycleCompleted = true
