@@ -173,7 +173,10 @@ import {
   isLoopbackOnlyRefusal
 } from './services/agent/agentRestClient'
 import { useAgentChatHistoryRefresh } from './composables/agent/useAgentChatHistoryRefresh'
-import { useAgentChatDrafts } from './composables/agent/useAgentChatDrafts'
+import {
+  draftKeyForOrigin,
+  useAgentChatDrafts
+} from './composables/agent/useAgentChatDrafts'
 import { useAgentWorkflowChatFollow } from './composables/agent/useAgentWorkflowChatFollow'
 import { ensureSignedIn, hasAgentCredential } from './services/agent/agentAuth'
 import type { DraftSnapshot } from './services/agent/agentRestClient'
@@ -587,7 +590,8 @@ const {
   openTabsSnapshot
 } = workflowResolver
 const {
-  savingReference,
+  savingReferenceFor,
+  rekeySavingReference,
   selectReference: selectWorkflowReference,
   restoreTarget: onWorkflowRestored,
   adoptTarget: adoptWorkflowTarget,
@@ -600,18 +604,10 @@ const {
   onTargetBound: (workflowId, previousWorkflowId, source) =>
     reportWorkflowBound(workflowId, previousWorkflowId, source)
 })
-const savingReferenceDraftKey = ref<string | null>(null)
-async function onSelectWorkflowReference(
+function onSelectWorkflowReference(
   option: WorkflowReferenceOption
 ): Promise<WorkflowReferenceMetadata | undefined> {
-  const draftKey = chatDrafts.draftKey.value
-  savingReferenceDraftKey.value = draftKey
-  try {
-    return await selectWorkflowReference(option)
-  } finally {
-    if (savingReferenceDraftKey.value === draftKey)
-      savingReferenceDraftKey.value = null
-  }
+  return selectWorkflowReference(option, chatDrafts.draftKey.value)
 }
 const tabActivity = useWorkflowTabActivityStore()
 const CREATING_TAB_MIN_DURATION_MS = 500
@@ -1173,9 +1169,14 @@ const {
   events,
   onThreadStarted: (source) =>
     useTelemetry()?.trackAgentThreadStarted({ source }),
-  onBlankSendAccepted: (blankChatId, acceptedThreadId) =>
-    chatDrafts.rekeyBlankDraft(blankChatId, acceptedThreadId),
-  onBackgroundTurnAccepted: (ack, text, _origin, workflowId) => {
+  onBlankSendAccepted: (blankChatId, acceptedThreadId) => {
+    chatDrafts.rekeyBlankDraft(blankChatId, acceptedThreadId)
+    rekeySavingReference(
+      blankChatId,
+      draftKeyForOrigin({ kind: 'thread', threadId: acceptedThreadId })
+    )
+  },
+  onBackgroundTurnAccepted: (ack, text, workflowId) => {
     if (history.isDeleted(ack.thread_id)) return
     if (workflowId !== undefined) openChats.remember(workflowId, ack.thread_id)
     history.rememberSession({
@@ -1245,8 +1246,17 @@ function blankChatIdFor(workflow: ComfyWorkflow | null): string {
   return conversationStore.blankChatIdForTab(workflow?.instanceId ?? null)
 }
 
+const gateHoldOnCurrentChat = computed(() => {
+  const held = composerStore.gateHold
+  if (held === null) return false
+  const pending = conversationStore.getPendingSend(held.clientMessageId)
+  return (
+    pending !== undefined && conversationStore.isOriginOnScreen(pending.origin)
+  )
+})
+
 const isSending = computed(
-  () => sessionIsSending.value || composerStore.gateHold !== null
+  () => sessionIsSending.value || gateHoldOnCurrentChat.value
 )
 
 conversationStore.adoptInitialBlankTab(
@@ -1256,10 +1266,8 @@ const chatDrafts = useAgentChatDrafts({
   threadId,
   activeBlankChatId: computed(() => conversationStore.activeBlankChatId)
 })
-const savingReferenceForCurrentDraft = computed(
-  () =>
-    savingReference.value &&
-    savingReferenceDraftKey.value === chatDrafts.draftKey.value
+const savingReferenceForCurrentDraft = computed(() =>
+  savingReferenceFor(chatDrafts.draftKey.value)
 )
 const blankUploadNonce = ref(0)
 
@@ -2092,7 +2100,6 @@ function showBlankChatForVisibleWorkflow(): void {
     agentPanelStore.followsVisibleWorkflow &&
     conversationStore.activeBlankChatId === visibleBlankId
   if (alreadyShowsIt) return
-  provisionalTitle.value = undefined
   openBlankChat()
   agentPanelStore.startFollowingVisibleWorkflow()
 }
@@ -2386,15 +2393,44 @@ async function consentAllowsSubmission(
   )
 }
 
-function captureSendTelemetryAndWorkflow(
-  targetTabPath: string | null,
+async function signInAllowsSubmission(
+  submissionId: number | undefined
+): Promise<boolean> {
+  if (hasAgentCredential()) return true
+  const identityBeforeSignIn = consentIdentity.value
+  if (!(await ensureSignedIn())) return false
+  return (
+    composerStore.gateHold?.id === submissionId &&
+    consentAccepted.value &&
+    consentIdentity.value === identityBeforeSignIn
+  )
+}
+
+async function passesSendGates(
+  submissionId: number | undefined,
+  clientMessageId: string,
+  nodesCount: number,
+  stagedTarget: ComfyWorkflow
+): Promise<boolean> {
+  if (
+    !consentAccepted.value &&
+    !(await consentAllowsSubmission(submissionId, clientMessageId))
+  )
+    return false
+  if (!(await signInAllowsSubmission(submissionId))) return false
+  return !(
+    nodesCount > 0 &&
+    selectedTarget.value?.instanceId !== stagedTarget.instanceId
+  )
+}
+
+function recordSendTelemetry(
+  turnOrigin: TurnOrigin,
   originThreadId: string | null,
   attachmentsCount: number,
   nodesCount: number,
   meta: SubmissionMeta
-): ComfyWorkflow | undefined {
-  const turnOrigin: TurnOrigin =
-    targetTabPath === null ? null : { tabPath: targetTabPath }
+): void {
   const originContext = targetWorkflowTurnContext(turnOrigin)
   pendingTelemetry.set(meta.clientMessageId, {
     metadata: {
@@ -2410,11 +2446,13 @@ function captureSendTelemetryAndWorkflow(
     origin:
       originContext === undefined ? null : { tabPath: originContext.tabPath }
   })
-  return originWorkflow(turnOrigin)
 }
 
 const { submit: onSend, withdrawSubmission } = useAgentDraftSubmission({
-  canSubmit: () => !savingReferenceForCurrentDraft.value && !isSending.value,
+  canSubmit: () =>
+    !savingReferenceForCurrentDraft.value &&
+    !isSending.value &&
+    composerStore.gateHold === null,
   onSubmit: agentPanelStore.retainWorkflowTarget,
   onRejected: sendGates.rejectDraft,
   target: () => selectedTarget.value,
@@ -2427,7 +2465,6 @@ const { submit: onSend, withdrawSubmission } = useAgentDraftSubmission({
     replace: replaceSelectionTags,
     exit: canvasStore.stopNodePicking
   },
-  // fallow-ignore-next-line complexity -- Existing PR logic; this lane changes only the composing panel test.
   send: async (
     text,
     attachments,
@@ -2438,38 +2475,29 @@ const { submit: onSend, withdrawSubmission } = useAgentDraftSubmission({
     stagedTarget
   ) => {
     const submissionId = composerStore.gateHold?.id
-    const targetTabPath = composerStore.gateHold?.snapshot.targetPath ?? null
+    const targetTabPath = stagedTarget.path
     const originThreadId = threadId.value
     if (
-      !consentAccepted.value &&
-      !(await consentAllowsSubmission(submissionId, meta.clientMessageId))
-    )
-      return 'withdrawn'
-    if (!hasAgentCredential()) {
-      const identityBeforeSignIn = consentIdentity.value
-      if (!(await ensureSignedIn())) return 'withdrawn'
-      if (
-        composerStore.gateHold?.id !== submissionId ||
-        !consentAccepted.value ||
-        consentIdentity.value !== identityBeforeSignIn
-      )
-        return 'withdrawn'
-    }
-    if (
-      nodes.length > 0 &&
-      selectedTarget.value?.instanceId !== stagedTarget.instanceId
+      !(await passesSendGates(
+        submissionId,
+        meta.clientMessageId,
+        nodes.length,
+        stagedTarget
+      ))
     )
       return 'withdrawn'
 
-    const capturedWorkflow = captureSendTelemetryAndWorkflow(
-      targetTabPath,
+    const turnOrigin: TurnOrigin = { tabPath: targetTabPath }
+    recordSendTelemetry(
+      turnOrigin,
       originThreadId,
       attachments.length,
       nodes.length,
       meta
     )
     releaseGate()
-    const selectionWorkflow = nodes.length > 0 ? stagedTarget : capturedWorkflow
+    const selectionWorkflow =
+      nodes.length > 0 ? stagedTarget : originWorkflow(turnOrigin)
     const sentUsageScope = proactive.scope.value
     try {
       const sent = await sendWithFundsRecheck((onAccepted) =>
@@ -2510,13 +2538,6 @@ function canRetryPendingFailure(
   return failure.retryAtMs === undefined || failure.retryAtMs <= Date.now()
 }
 
-function savingReferenceForOrigin(origin: PendingSendOrigin): boolean {
-  if (!savingReference.value) return false
-  const originKey =
-    origin.kind === 'blank' ? origin.blankChatId : `thread:${origin.threadId}`
-  return savingReferenceDraftKey.value === originKey
-}
-
 function retryablePendingSend(clientMessageId: string) {
   const pending = conversationStore.getPendingSend(clientMessageId)
   if (!pending || pending.status !== 'failed') return null
@@ -2526,7 +2547,7 @@ function retryablePendingSend(clientMessageId: string) {
     return null
   if (!canRetryPendingFailure(pending.failure)) return null
   if (
-    savingReferenceForOrigin(pending.origin) ||
+    savingReferenceFor(draftKeyForOrigin(pending.origin)) ||
     conversationStore.isOriginBusy(pending.origin)
   )
     return null
@@ -2620,8 +2641,7 @@ async function onRetryPendingSend(clientMessageId: string): Promise<void> {
 }
 
 function onStop(method: AgentStopMethod): void {
-  const held = composerStore.gateHold
-  if (held !== null) {
+  if (gateHoldOnCurrentChat.value) {
     const cancelled = composerStore.cancelGateHold()
     if (sendHeldByCoach.value)
       releaseCoachCompletionWaiters(
@@ -2689,6 +2709,17 @@ function openFailedBlankTab(blankChatId: string): ComfyWorkflow | undefined {
   )
 }
 
+function activateFailedBlankTab(blankChatId: string): boolean {
+  const originTab = openFailedBlankTab(blankChatId)
+  if (originTab === undefined) return false
+  conversationStore.setBlankChatIdForTab(originTab.instanceId, blankChatId)
+  if (workflowStore.activeWorkflow?.path === originTab.path) return false
+  if (selectedTarget.value?.path === originTab.path)
+    agentPanelStore.startFollowingVisibleWorkflow()
+  void workflowService.openWorkflow(originTab, { initiator: 'user' })
+  return true
+}
+
 function showOffscreenBlankSend(
   blankChatId: string,
   toastId: ToastId,
@@ -2697,8 +2728,8 @@ function showOffscreenBlankSend(
   toast.dismiss(toastId)
   offscreenFailureToasts.delete(toastId)
   const activeWorkspace = workspaceStore.activeWorkspaceId ?? null
-  if (activeWorkspace !== originWorkspaceId) return
   if (
+    activeWorkspace !== originWorkspaceId ||
     !conversationStore.hasPendingSendForBlankChat(blankChatId, activeWorkspace)
   )
     return
@@ -2706,16 +2737,7 @@ function showOffscreenBlankSend(
   agentPanelStore.view = { screen: 'chat' }
   retireFollow()
   resetComposerForChatSwitch()
-  const originTab = openFailedBlankTab(blankChatId)
-  if (originTab !== undefined) {
-    conversationStore.setBlankChatIdForTab(originTab.instanceId, blankChatId)
-    if (workflowStore.activeWorkflow?.path !== originTab.path) {
-      if (selectedTarget.value?.path === originTab.path)
-        agentPanelStore.startFollowingVisibleWorkflow()
-      void workflowService.openWorkflow(originTab, { initiator: 'user' })
-      return
-    }
-  }
+  if (activateFailedBlankTab(blankChatId)) return
   if (reopenBlankChat(blankChatId)) {
     void proactive.refresh()
     agentPanelStore.startFollowingVisibleWorkflow()
@@ -2755,11 +2777,15 @@ function discardBlankComposerBeforeNewChat(): void {
     kind: 'blank' as const,
     blankChatId: blankChatIdFor(workflowStore.activeWorkflow)
   }
+  if (
+    threadId.value !== null ||
+    conversationStore.activeBlankChatId !== targetBlankOrigin.blankChatId
+  )
+    return
   for (const discardedId of conversationStore.discardFailedPendingSends(
     targetBlankOrigin
   ))
     composerStore.releaseRetainedAssets(pendingAssetOwnerKey(discardedId))
-  if (threadId.value !== null) return
   for (const { id } of composerStore.attachments) attachment.cancelUpload(id)
   blankUploadNonce.value += 1
 }
@@ -2903,7 +2929,10 @@ const attachment = useAttachment({
   maxBytes: () => flags.maxUploadSize ?? MAX_ATTACHMENT_BYTES,
   onError: warnAttachment,
   onDuplicate: notifyDuplicateAttachments,
-  draftScope: () => `${chatDrafts.draftKey.value}:${blankUploadNonce.value}`,
+  draftScope: () =>
+    threadId.value === null
+      ? `${chatDrafts.draftKey.value}:${blankUploadNonce.value}`
+      : chatDrafts.draftKey.value,
   staged: () => composerStore.attachments,
   stage: composerStore.addAttachment,
   update: composerStore.updateAttachment,
@@ -3182,6 +3211,10 @@ onMounted(() => agentPanelRenderStore.reach('drawn'))
       :visible-tab-path="workflowStore.activeWorkflow?.path ?? null"
       :follows-visible-workflow="agentPanelStore.followsVisibleWorkflow"
       :workflow-detached="workflowDetached"
+      :target-restoring="
+        agentPanelStore.canRestoreWorkflow ||
+        (threadId !== null && history.activeId !== threadId)
+      "
       :target-unavailable="agentPanelStore.targetUnavailable"
       :canvas-empty-after-turn="canvasEmptyAfterTurn"
       :get-mention-nodes="mentionableNodes"
@@ -3192,7 +3225,7 @@ onMounted(() => agentPanelRenderStore.reach('drawn'))
         crdtStatus.terminal === 'retry_exhausted' ||
         crdtStatus.terminal === 'timeout'
       "
-      :retry-blocked="workflowSelecting"
+      :retry-blocked="savingReferenceForCurrentDraft"
       :free-use-placement="freeUsePlacement"
       @free-use-notice="onFreeUseNotice"
       @send="onSend"
