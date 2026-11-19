@@ -59,6 +59,7 @@ import type {
 } from '@/workbench/extensions/agent/schemas/agentApiSchema'
 
 const LIST_PAGE_SIZE = 100
+const POST_MESSAGE_TIMEOUT_MS = 60_000
 
 /**
  * PM-1658: tightens `fetchApi`'s shared 60s header deadline for the one
@@ -645,7 +646,8 @@ export function createAgentRestClient() {
     operation: AgentApiOperation,
     route: string,
     init: Parameters<typeof api.fetchApi>[1],
-    schema: z.ZodType<T>
+    schema: z.ZodType<T>,
+    treatBodyFailureAsUnreadable = false
   ): Promise<RequestResult<T>> {
     let authScheme: ReportedAuthScheme = 'unreported'
     let credential: ReportedAuthCredential = 'unreported'
@@ -689,7 +691,7 @@ export function createAgentRestClient() {
       return {
         ok: false,
         cause:
-          cause instanceof SyntaxError
+          cause instanceof SyntaxError || treatBodyFailureAsUnreadable
             ? new AgentResponseUnreadableError(cause)
             : cause
       }
@@ -704,9 +706,16 @@ export function createAgentRestClient() {
     operation: AgentApiOperation,
     route: string,
     init: Parameters<typeof api.fetchApi>[1],
-    schema: z.ZodType<T>
+    schema: z.ZodType<T>,
+    treatBodyFailureAsUnreadable = false
   ): Promise<T> {
-    const result = await requestResult(operation, route, init, schema)
+    const result = await requestResult(
+      operation,
+      route,
+      init,
+      schema,
+      treatBodyFailureAsUnreadable
+    )
     if (!result.ok) throw rememberAgentRequestFailure(result.cause, route)
     return result.value
   }
@@ -794,12 +803,34 @@ export function createAgentRestClient() {
       client_id: api.clientId,
       client_version: CLIENT_VERSION
     })
-    return request(
-      'post_thread_message',
-      `/agent/threads/${encodeURIComponent(threadId)}/messages`,
-      jsonInit('POST', body),
-      zAgentTurnAccepted
+    const controller = new AbortController()
+    const timeoutId = setTimeout(
+      () =>
+        controller.abort(
+          new DOMException('Agent post message timeout', 'TimeoutError')
+        ),
+      POST_MESSAGE_TIMEOUT_MS
     )
+    try {
+      return await Promise.race([
+        request(
+          'post_thread_message',
+          `/agent/threads/${encodeURIComponent(threadId)}/messages`,
+          { ...jsonInit('POST', body), signal: controller.signal },
+          zAgentTurnAccepted,
+          true
+        ),
+        new Promise<never>((_, reject) => {
+          controller.signal.addEventListener(
+            'abort',
+            () => reject(controller.signal.reason),
+            { once: true }
+          )
+        })
+      ])
+    } finally {
+      clearTimeout(timeoutId)
+    }
   }
 
   async function getUsageStatus(
