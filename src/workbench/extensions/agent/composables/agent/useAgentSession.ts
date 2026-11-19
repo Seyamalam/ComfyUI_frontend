@@ -33,7 +33,6 @@ import type {
   AgentMessages,
   AgentTurnAccepted,
   AgentWsEvent,
-  RenderedAskKind,
   TurnId
 } from '@/workbench/extensions/agent/schemas/agentApiSchema'
 import {
@@ -395,11 +394,11 @@ type AnswerReceiptSource =
 
 function namesCommittedAnswer(
   { selected, other_text }: CommittedAnswerSource,
-  askKind?: RenderedAskKind | 'unknown'
+  minSelections?: number
 ): boolean {
   if (other_text) return true
   if (!Array.isArray(selected)) return false
-  return askKind !== 'run_approval' || selected.length > 0
+  return selected.length > 0 || minSelections === 0
 }
 
 function diffAnswers(
@@ -1901,7 +1900,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
     }
     if (answeringAskIds.value.has(askId)) return false
     conversationStore.recordAskAnswer(askId, answer, currentThreadId)
-    const askKind = conversationStore.submittedAskKind(askId)
+    const minSelections = conversationStore.submittedAskMinSelections(askId)
     conversationStore.setAskAnswering(askId, true)
     const answerChannelEpoch = resolutionChannelEpoch
     const answerStartedBeforeFirstOpen = connection === 'initial'
@@ -1910,14 +1909,17 @@ export function useAgentSession(deps: AgentSessionDeps) {
       answerStartedDropped || resolutionChannelEpoch !== answerChannelEpoch
     const resolutionChannelWasLost = () =>
       answerStartedBeforeFirstOpen || resolutionChannelDropped()
+    let answerRetried = false
     try {
-      const receipt = await sendAnswer(currentThreadId, askId, answer)
+      const receipt = await sendAnswer(currentThreadId, askId, answer, () => {
+        answerRetried = true
+      })
       return commitAskReceipt({
         askId,
         answer,
         currentThreadId,
         receipt,
-        askKind,
+        minSelections,
         resolutionChannelDropped
       })
     } catch (error) {
@@ -1926,7 +1928,8 @@ export function useAgentSession(deps: AgentSessionDeps) {
           error,
           askId,
           currentThreadId,
-          askKind,
+          minSelections,
+          answerRetried,
           resolutionChannelWasLost()
         )
       return false
@@ -1938,17 +1941,17 @@ export function useAgentSession(deps: AgentSessionDeps) {
     answer,
     currentThreadId,
     receipt,
-    askKind,
+    minSelections,
     resolutionChannelDropped
   }: {
     askId: string
     answer: AgentAnswerRequest
     currentThreadId: string
     receipt: AgentAnswerReceipt
-    askKind: RenderedAskKind | 'unknown' | undefined
+    minSelections: number | undefined
     resolutionChannelDropped: () => boolean
   }): boolean {
-    if (!receiptNamesCommittedAnswer(receipt, askKind))
+    if (!receiptNamesCommittedAnswer(receipt, minSelections))
       return commitStatusOnlyAskReceipt({
         askId,
         answer,
@@ -1968,10 +1971,10 @@ export function useAgentSession(deps: AgentSessionDeps) {
 
   function receiptNamesCommittedAnswer(
     receipt: AnswerReceiptSource,
-    askKind: RenderedAskKind | 'unknown' | undefined
+    minSelections: number | undefined
   ): boolean {
     if (receipt.status !== 'answered') return false
-    return namesCommittedAnswer(receipt, askKind)
+    return namesCommittedAnswer(receipt, minSelections)
   }
 
   function commitStatusOnlyAskReceipt({
@@ -1988,6 +1991,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
     const channelDropped = resolutionChannelDropped()
     const askKind = conversationStore.submittedAskKind(askId)
     const askMessageId = conversationStore.submittedAskMessageId(askId)
+    const minSelections = conversationStore.submittedAskMinSelections(askId)
     const resolutionStillPending =
       conversationStore.submittedAskAnswer(askId) !== undefined
     if (resolutionStillPending)
@@ -1997,14 +2001,23 @@ export function useAgentSession(deps: AgentSessionDeps) {
         conversationStore.threadId === currentThreadId
       )
     recordDeliveredAsk(askId)
-    conversationStore.commitAsk(askId, currentThreadId, { status: 'retired' })
+    conversationStore.commitAsk(askId, currentThreadId, {
+      status: 'answered',
+      selected: answer.selected,
+      ...(answer.other_text ? { otherText: answer.other_text } : {})
+    })
     if (resolutionStillPending && !channelDropped) {
+      if (stopped) {
+        reportAcceptedRecoveredAnswer(askId, true, false)
+        return !supersededAnswerReports.has(askId)
+      }
       conversationStore.recordAskAnswer(
         askId,
         answer,
         currentThreadId,
         askKind,
-        askMessageId
+        askMessageId,
+        minSelections
       )
       conversationStore.markAskAwaitingResolution(askId, 'accepted', () => {
         if (stopped) return false
@@ -2061,7 +2074,8 @@ export function useAgentSession(deps: AgentSessionDeps) {
     error: unknown,
     askId: string,
     threadId: string,
-    askKind: RenderedAskKind | 'unknown' | undefined,
+    minSelections: number | undefined,
+    answerRetried: boolean,
     resolutionChannelWasLost = connection === 'dropped'
   ): boolean {
     conversationStore.clearAskAwaitingResolution(askId)
@@ -2070,7 +2084,8 @@ export function useAgentSession(deps: AgentSessionDeps) {
         error,
         askId,
         threadId,
-        askKind,
+        minSelections,
+        answerRetried,
         resolutionChannelWasLost
       )
     }
@@ -2107,7 +2122,8 @@ export function useAgentSession(deps: AgentSessionDeps) {
     error: AgentApiError,
     askId: string,
     threadId: string,
-    askKind: RenderedAskKind | 'unknown' | undefined,
+    minSelections: number | undefined,
+    answerRetried: boolean,
     resolutionChannelWasLost: boolean
   ): boolean {
     const conflict = zAgentAskConflict.safeParse(error.body)
@@ -2126,7 +2142,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
     const submitted = conversationStore.submittedAskAnswer(askId)
     if (
       conflict.success &&
-      receiptNamesCommittedAnswer(conflict.data, askKind)
+      receiptNamesCommittedAnswer(conflict.data, minSelections)
     ) {
       const committed = toAskResolution(conflict.data)
       const superseded =
@@ -2146,7 +2162,8 @@ export function useAgentSession(deps: AgentSessionDeps) {
       askId,
       threadId,
       submitted,
-      resolutionChannelWasLost
+      resolutionChannelWasLost,
+      answerRetried
     )
     return false
   }
@@ -2156,16 +2173,19 @@ export function useAgentSession(deps: AgentSessionDeps) {
     askId: string,
     threadId: string,
     submitted: AgentAnswerRequest | undefined,
-    resolutionChannelWasLost: boolean
+    resolutionChannelWasLost: boolean,
+    answerRetried: boolean
   ): void {
     const askKind = conversationStore.submittedAskKind(askId)
     const askMessageId = conversationStore.submittedAskMessageId(askId)
+    const minSelections = conversationStore.submittedAskMinSelections(askId)
     recordDeliveredAsk(askId)
     conversationStore.retireAsk(
       askId,
       { status: resolutionChannelWasLost ? 'unconfirmed' : 'retired' },
       threadId
     )
+    if (!answerRetried) return
     if (!resolutionChannelWasLost) {
       if (submitted) {
         conversationStore.recordAskAnswer(
@@ -2173,7 +2193,8 @@ export function useAgentSession(deps: AgentSessionDeps) {
           submitted,
           threadId,
           askKind,
-          askMessageId
+          askMessageId,
+          minSelections
         )
         conversationStore.markAskAwaitingResolution(askId, 'conflict', () => {
           if (stopped) return false
@@ -2196,10 +2217,15 @@ export function useAgentSession(deps: AgentSessionDeps) {
 
   function reportSupersededAnswer(
     askId: string,
-    source: CommittedAnswerSource
+    source: CommittedAnswerSource,
+    canonicalFrame = false
   ): void {
     if (
-      !namesCommittedAnswer(source, conversationStore.submittedAskKind(askId))
+      !canonicalFrame &&
+      !namesCommittedAnswer(
+        source,
+        conversationStore.submittedAskMinSelections(askId)
+      )
     )
       return
     const committed = toAskResolution(source)
@@ -2232,7 +2258,8 @@ export function useAgentSession(deps: AgentSessionDeps) {
   async function sendAnswer(
     threadId: string,
     askId: string,
-    answer: AgentAnswerRequest
+    answer: AgentAnswerRequest,
+    onRetry: () => void
   ): Promise<AgentAnswerReceipt> {
     for (let attempt = 0; ; attempt++) {
       try {
@@ -2243,6 +2270,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
           !isRetryableAnswerFailure(error)
         )
           throw error
+        onRetry()
         await new Promise((resolve) =>
           setTimeout(resolve, ANSWER_RETRY_BACKOFF_MS[attempt])
         )
@@ -2451,7 +2479,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
   ): void {
     conversationStore.clearAskAwaitingResolution(event.data.ask_id)
     const resolution = toAskResolution(event.data)
-    reportSupersededAnswer(event.data.ask_id, event.data)
+    reportSupersededAnswer(event.data.ask_id, event.data, true)
     conversationStore.retireAsk(
       event.data.ask_id,
       resolution,
@@ -2671,9 +2699,10 @@ export function useAgentSession(deps: AgentSessionDeps) {
     const ownsKey = recoveringTurns.get(key) === state
     if (ownsKey && generation === sessionGeneration)
       conversationStore.reconcileSettledTurn(turn, undefined)
+    if (ownsKey) recoveryPendingAskObservations.delete(key)
     finishRecovery(key, recovery, state, turn)
-    if (!ownsKey) return
-    recoveryPendingAskObservations.delete(key)
+    if (ownsKey && isTurnLive(turn, generation))
+      void reconcileTurn(turn, 'hydrate')
   }
 
   async function reconcileSettledSnapshotTurn(turn: LiveTurn): Promise<void> {
@@ -2752,7 +2781,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
     const previousObservation = recentPendingAskObservation(key)
     const deliveredAtRecoveryStart = new Set(deliveredAsks)
     const state: RecoveryObservationState = {
-      previousObservation,
+      previousObservation: undefined,
       hasUnconfirmedObservation: false,
       sawStreamingObservation: false,
       consecutiveThreadMissing: 0,
@@ -2989,10 +3018,6 @@ export function useAgentSession(deps: AgentSessionDeps) {
     cause: RecoveryCause
   ): void {
     const lostFrame = cause === 'reconnect' || connection === 'dropped'
-    if (!lostFrame) {
-      sendRestoredApprovalReport(turn, askId, cause, 'warning')
-      return
-    }
     const key = lateAskReportKey(turn.threadId, askId)
     withdrawLateAskReport(turn.threadId, askId)
     lateAskReports.set(key, {
@@ -3000,7 +3025,12 @@ export function useAgentSession(deps: AgentSessionDeps) {
       messageId: turn.messageId,
       timer: setTimeout(() => {
         lateAskReports.delete(key)
-        sendRestoredApprovalReport(turn, askId, cause, 'error')
+        sendRestoredApprovalReport(
+          turn,
+          askId,
+          cause,
+          lostFrame ? 'error' : 'warning'
+        )
       }, LATE_ASK_FRAME_GRACE_MS)
     })
   }
