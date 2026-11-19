@@ -35,7 +35,6 @@ import { useWorkspaceStore } from '@/stores/workspaceStore'
 import { electronAPI } from '@/utils/envUtil'
 import { parsePreloadError } from '@/utils/preloadErrorUtil'
 import { useConflictDetection } from '@/platform/customNodes/manager/composables/useConflictDetection'
-import { useSafeExtensionBootNotice } from '@/platform/customNodes/useSafeExtensionBootNotice'
 
 registerExtensionDialogService(createExtensionDialogService())
 const workspaceStore = useWorkspaceStore()
@@ -43,7 +42,6 @@ useApp().extensionManager = useWorkspaceStore()
 
 const conflictDetection = useConflictDetection()
 useAgentExtensionNotices()
-useSafeExtensionBootNotice()
 const isLoading = computed<boolean>(() => workspaceStore.spinner)
 
 watch(
