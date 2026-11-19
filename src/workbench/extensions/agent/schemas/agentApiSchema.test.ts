@@ -624,9 +624,10 @@ describe('agentApiSchema contract subtleties', () => {
     ).toBe(true)
   })
 
-  it('parses agent_turn_status websocket frames for wait, pause, and fail phases', () => {
-    expect(isAgentEvent('agent_turn_status')).toBe(true)
-    for (const phase of ['wait', 'pause', 'fail'] as const) {
+  it.for(['wait', 'pause', 'fail'] as const)(
+    'parses agent_turn_status websocket frames for phase %s',
+    (phase) => {
+      expect(isAgentEvent('agent_turn_status')).toBe(true)
       const parsed = parseAgentWsEvent({
         type: 'agent_turn_status',
         data: {
@@ -640,6 +641,9 @@ describe('agentApiSchema contract subtleties', () => {
       })
       expect(parsed.success).toBe(true)
     }
+  )
+
+  it('rejects agent_turn_status websocket frames with an unknown phase', () => {
     expect(
       parseAgentWsEvent({
         type: 'agent_turn_status',
