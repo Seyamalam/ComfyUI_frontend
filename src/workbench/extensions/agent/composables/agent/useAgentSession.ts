@@ -392,6 +392,8 @@ type AnswerReceiptSource =
   | AgentAnswerReceipt
   | ZodInfer<typeof zAgentAskConflict>
 
+const pendingSupersededNoticeThreads = new Set<string>()
+
 function namesCommittedAnswer(
   { selected, other_text }: CommittedAnswerSource,
   minSelections?: number
@@ -643,6 +645,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
   let ownedGeneration = 0
   let connection: SocketConnection = 'initial'
   let receivedStatusSnapshot = false
+  let initialStatusWasOffline = false
   let resolutionChannelEpoch = 0
   interface RunningRecovery {
     controller: AbortController
@@ -783,6 +786,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
     ownedGeneration = ++sessionGeneration
     connection = 'initial'
     receivedStatusSnapshot = false
+    initialStatusWasOffline = false
     for (const awaiting of conversationStore.asksAwaitingResolution())
       conversationStore.markAskAwaitingResolution(
         awaiting.askId,
@@ -1048,6 +1052,8 @@ export function useAgentSession(deps: AgentSessionDeps) {
     rememberSnapshotTurn(conversationStore.activeTurnId)
     reconcileLiveTurns('hydrate', threadId)
     readyThreadId.value = threadId
+    if (pendingSupersededNoticeThreads.delete(threadId))
+      pushError(i18n.global.t('agent.runApproval.answerSuperseded'))
     drainHydration(buffer)
     const workflowReady = await workflow?.restored?.(
       conversationStore.latestWorkflowId,
@@ -2190,15 +2196,18 @@ export function useAgentSession(deps: AgentSessionDeps) {
     conversationStore.retireAsk(
       askId,
       {
-        status:
-          answerRetried && resolutionChannelWasLost ? 'unconfirmed' : 'retired'
+        status: answerRetried ? 'unconfirmed' : 'retired'
       },
       threadId,
       true,
       undefined,
       submitted !== undefined
     )
-    if (!answerRetried) return
+    if (!answerRetried) {
+      if (submitted !== undefined)
+        conversationStore.deferSubmittedAskCleanup(askId)
+      return
+    }
     if (stopped) {
       reportUnconfirmedConflict(askId, false)
       conversationStore.completeAskResolutionReport(askId)
@@ -2271,6 +2280,14 @@ export function useAgentSession(deps: AgentSessionDeps) {
     })
     if (submitted.owner === conversationStore.threadId)
       pushError(i18n.global.t('agent.runApproval.answerSuperseded'))
+    else {
+      pendingSupersededNoticeThreads.delete(submitted.owner)
+      pendingSupersededNoticeThreads.add(submitted.owner)
+      while (pendingSupersededNoticeThreads.size > MAX_DELIVERED_ASKS)
+        pendingSupersededNoticeThreads.delete(
+          pendingSupersededNoticeThreads.values().next().value!
+        )
+    }
   }
 
   async function sendAnswer(
@@ -2495,7 +2512,6 @@ export function useAgentSession(deps: AgentSessionDeps) {
   function handleResolvedAsk(
     event: Extract<AgentWsEvent, { type: 'agent_ask_resolved' }>
   ): void {
-    conversationStore.clearAskAwaitingResolution(event.data.ask_id)
     const resolution = toAskResolution(event.data)
     const namesAnswer =
       event.data.status === 'answered' &&
@@ -2503,6 +2519,8 @@ export function useAgentSession(deps: AgentSessionDeps) {
         event.data,
         conversationStore.submittedAskMinSelections(event.data.ask_id)
       )
+    if (event.data.status !== 'answered' || namesAnswer)
+      conversationStore.clearAskAwaitingResolution(event.data.ask_id)
     reportSupersededAnswer(event.data.ask_id, event.data)
     conversationStore.retireAsk(
       event.data.ask_id,
@@ -2564,13 +2582,17 @@ export function useAgentSession(deps: AgentSessionDeps) {
     if (reconnected) {
       conversationStore.markActiveTurnMissedFrames()
       reconcileLiveTurns('reconnect')
-    } else if (firstLive)
-      reconcileLiveTurns('hydrate', conversationStore.threadId ?? undefined)
+    } else if (firstLive) {
+      if (initialStatusWasOffline) reconcileLiveTurns('reconnect')
+      else if (conversationStore.threadId !== null)
+        reconcileLiveTurns('hydrate', conversationStore.threadId)
+    }
   }
 
   function handleSocketOffline(): void {
     if (connection === 'initial' && !receivedStatusSnapshot) {
       receivedStatusSnapshot = true
+      initialStatusWasOffline = true
       return
     }
     receivedStatusSnapshot = true
@@ -2589,6 +2611,11 @@ export function useAgentSession(deps: AgentSessionDeps) {
           awaiting.askId,
           awaiting.owner === conversationStore.threadId
         )
+      conversationStore.retireAsk(
+        awaiting.askId,
+        { status: 'unconfirmed' },
+        awaiting.owner
+      )
       conversationStore.completeAskResolutionReport(awaiting.askId)
     }
   }
