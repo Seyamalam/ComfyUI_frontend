@@ -207,6 +207,18 @@ export const useComfyManagerStore = defineStore('comfyManager', () => {
       return acc
     }, new Set<NodePackId>())
 
+  const invalidInstallationPackIds = computed(() =>
+    packsToIdSet(
+      Object.values(installedPacks.value).filter(
+        (pack) => pack.invalid_installation
+      )
+    )
+  )
+
+  const isInvalidInstallationPackId = (
+    packName: NodePackId | undefined
+  ): boolean => !!packName && invalidInstallationPackIds.value.has(packName)
+
   /**
    * A pack is disabled if there is a disabled entry and no corresponding
    * enabled entry. If `packname@1.0.2` is disabled, but `packname@1.0.3` is
@@ -378,6 +390,20 @@ export const useComfyManagerStore = defineStore('comfyManager', () => {
     },
     { maxSize: 1 }
   )
+
+  const reinstallPack = async (params: InstallPackParams) => {
+    if (installingPacksIds.value.has(params.id)) return
+
+    installingPacksIds.value.add(params.id)
+    const task = (taskId: string) => {
+      taskIdToPackId.value.set(taskId, params.id)
+      return managerService.reinstallPack(params, taskId)
+    }
+    await enqueueTaskWithLogs(
+      task,
+      `${t('manager.invalidInstallation.reinstalling')} ${params.id}`
+    )
+  }
 
   async function switchPack(
     pack: RegistryPack & { id: NodePackId },
@@ -563,6 +589,7 @@ export const useComfyManagerStore = defineStore('comfyManager', () => {
     isPackInstalled: isInstalledPackId,
     isPackEnabled: isEnabledPackId,
     isPackInstalling: isInstallingPackId,
+    isPackInvalidInstallation: isInvalidInstallationPackId,
     getInstalledPackVersion,
     refreshInstalledList,
 
@@ -582,6 +609,7 @@ export const useComfyManagerStore = defineStore('comfyManager', () => {
 
     // Pack actions
     installPack,
+    reinstallPack,
     uninstallPack,
     updatePack,
     updatePacks,

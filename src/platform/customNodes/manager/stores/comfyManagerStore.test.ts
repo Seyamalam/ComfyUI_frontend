@@ -109,6 +109,7 @@ describe('useComfyManagerStore', () => {
       getImportFailInfo: vi.fn().mockResolvedValue(null),
       getImportFailInfoBulk: vi.fn().mockResolvedValue({}),
       installPack: vi.fn().mockResolvedValue(''),
+      reinstallPack: vi.fn().mockResolvedValue(''),
       uninstallPack: vi.fn().mockResolvedValue(''),
       enablePack: vi.fn().mockResolvedValue(''),
       disablePack: vi.fn().mockResolvedValue(''),
@@ -1044,6 +1045,191 @@ describe('useComfyManagerStore', () => {
     })
     await emptyBatch
     expect(store.isProcessingTasks).toBe(true)
+  })
+
+  describe('isPackInvalidInstallation', () => {
+    const invalidFolder: ManagerPackInstalled = {
+      ver: 'unknown',
+      cnr_id: 'comfyui-foo',
+      aux_id: null,
+      enabled: true,
+      invalid_installation: true
+    }
+    const validInstall: ManagerPackInstalled = {
+      ver: '1.0.0',
+      cnr_id: 'comfyui-foo',
+      enabled: true
+    }
+
+    it.for<{
+      name: string
+      installed: InstalledPacksResponse
+      expected: boolean
+    }>([
+      {
+        name: 'a flagged folder named after something else',
+        installed: { 'ComfyUI-Foo': invalidFolder },
+        expected: true
+      },
+      {
+        name: 'a flagged folder beside a valid install',
+        installed: {
+          'comfyui-foo': validInstall,
+          'ComfyUI-Foo': invalidFolder
+        },
+        expected: true
+      },
+      {
+        name: 'only a valid install',
+        installed: { 'comfyui-foo': validInstall },
+        expected: false
+      },
+      {
+        name: 'a flagged folder of another pack',
+        installed: {
+          'comfyui-foo': validInstall,
+          'ComfyUI-Bar': { ...invalidFolder, cnr_id: 'comfyui-bar' }
+        },
+        expected: false
+      }
+    ])('is $expected for $name', async ({ installed, expected }) => {
+      const store = useComfyManagerStore()
+      await triggerPacksChange(installed, store)
+
+      expect(store.isPackInvalidInstallation('comfyui-foo')).toBe(expected)
+      expect(store.isPackInstalled('comfyui-foo')).toBe(true)
+    })
+  })
+
+  describe('reinstallPack', () => {
+    const request: ManagerComponents['schemas']['InstallPackParams'] = {
+      id: 'comfyui-foo',
+      repository: 'https://github.com/test/comfyui-foo',
+      channel: 'dev',
+      mode: 'cache',
+      version: '1.2.0',
+      selected_version: '1.2.0'
+    }
+    const invalidInstall: InstalledPacksResponse = {
+      'ComfyUI-Foo': {
+        ver: 'unknown',
+        cnr_id: 'comfyui-foo',
+        aux_id: null,
+        enabled: true,
+        invalid_installation: true
+      }
+    }
+
+    it.for([
+      {
+        name: 'success',
+        status: 'success',
+        result: 'success',
+        installed: {
+          'comfyui-foo': { ver: '1.2.0', cnr_id: 'comfyui-foo', enabled: true }
+        },
+        expectedInvalid: false,
+        expectedToasts: []
+      },
+      {
+        name: 'failure',
+        status: 'error',
+        result: 'Reinstall failed. See the terminal for details.',
+        installed: invalidInstall,
+        expectedInvalid: true,
+        expectedToasts: [
+          expect.objectContaining({
+            kind: 'error',
+            description: 'Reinstall failed. See the terminal for details.'
+          })
+        ]
+      }
+    ] as const)(
+      'queues a reinstall task and reflects its $name',
+      async ({
+        status,
+        result,
+        installed,
+        expectedInvalid,
+        expectedToasts
+      }) => {
+        const store = useComfyManagerStore()
+        await triggerPacksChange(invalidInstall, store)
+        expect(store.isPackInvalidInstallation('comfyui-foo')).toBe(true)
+
+        await store.reinstallPack(request)
+
+        expect(mockManagerService.reinstallPack).toHaveBeenCalledWith(
+          request,
+          expect.any(String)
+        )
+        expect(mockManagerService.startQueue).toHaveBeenCalledOnce()
+        expect(store.isPackInstalling('comfyui-foo')).toBe(true)
+        const taskId = vi.mocked(mockManagerService.reinstallPack).mock
+          .calls[0][1]
+        assert.isDefined(taskId)
+
+        const taskStatus: TaskExecutionStatus = {
+          status_str: status,
+          completed: true,
+          messages: [result]
+        }
+        api.dispatchCustomEvent('cm-task-completed', {
+          ui_id: taskId,
+          kind: 'reinstall',
+          result,
+          status: taskStatus,
+          timestamp: '2026-11-20T00:00:00Z',
+          state: {
+            installed_packs: installed,
+            running_queue: [],
+            pending_queue: [],
+            history: {
+              [taskId]: {
+                ui_id: taskId,
+                client_id: 'test-client',
+                kind: 'reinstall',
+                result,
+                status: taskStatus,
+                timestamp: '2026-11-20T00:00:00Z'
+              }
+            }
+          }
+        })
+        await nextTick()
+
+        expect(store.isPackInstalling('comfyui-foo')).toBe(false)
+        expect(store.isPackInvalidInstallation('comfyui-foo')).toBe(
+          expectedInvalid
+        )
+        expect(store.isProcessingTasks).toBe(false)
+        expect(useToast().toasts).toEqual(expectedToasts)
+      }
+    )
+
+    it('clears a rejected reinstall request so the user can retry', async () => {
+      vi.mocked(mockManagerService.reinstallPack).mockImplementationOnce(
+        async () => {
+          mockManagerService.error.value =
+            'Request rejected. Check the terminal.'
+          return null
+        }
+      )
+      const store = useComfyManagerStore()
+      await triggerPacksChange(invalidInstall, store)
+
+      await store.reinstallPack(request)
+
+      expect(store.isPackInstalling('comfyui-foo')).toBe(false)
+      expect(store.isProcessingTasks).toBe(false)
+      expect(mockManagerService.startQueue).not.toHaveBeenCalled()
+      expect(useToast().toasts).toEqual([
+        expect.objectContaining({
+          kind: 'error',
+          description: 'Request rejected. Check the terminal.'
+        })
+      ])
+    })
   })
 
   const testCases: EnabledDisabledTestCase[] = [
