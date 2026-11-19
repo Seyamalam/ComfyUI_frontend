@@ -145,7 +145,8 @@ export interface AgentSessionDeps {
   onBackgroundTurnAccepted?: (
     ack: AgentTurnAccepted,
     text: string,
-    workflowId?: string
+    workflowId: string | undefined,
+    sendId: string
   ) => void
   onBlankTurnAccepted?: (ack: AgentTurnAccepted, blankChatId: string) => void
   onOffscreenBlankSendFailed?: (failure: OffscreenBlankSendFailure) => void
@@ -1663,6 +1664,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
   }
 
   function acceptBackgroundTurn({
+    sendId,
     ack,
     origin,
     turnOrigin,
@@ -1677,6 +1679,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
     stopped,
     canvasBaseline
   }: {
+    sendId: string
     ack: AgentTurnAccepted
     origin: PendingSendOrigin
     turnOrigin: TurnOrigin
@@ -1713,7 +1716,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
     consumeThreadSource(origin)
     recordTurnStarted(turnId, origin.kind === 'blank', threadSourceAtSend)
     runAcceptedTurnSideEffect(() => {
-      onBackgroundTurnAccepted?.(ack, text, tabWorkflowId)
+      onBackgroundTurnAccepted?.(ack, text, tabWorkflowId, sendId)
       if (origin.kind === 'blank')
         onBlankTurnAccepted?.(ack, origin.blankChatId)
     }, 'agent_thread_activated_callback_failed')
@@ -2042,7 +2045,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
       threadSourceAtSend
     )
     runAcceptedTurnSideEffect(() => {
-      onBackgroundTurnAccepted?.(ack, text, tabWorkflowId)
+      onBackgroundTurnAccepted?.(ack, text, tabWorkflowId, sendId)
       if (origin.kind === 'blank')
         onBlankTurnAccepted?.(ack, origin.blankChatId)
     }, 'agent_thread_activated_callback_failed')
@@ -2133,6 +2136,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
       )
     } else {
       acceptBackgroundTurn({
+        sendId,
         ack,
         origin,
         turnOrigin: params.turnOrigin,
@@ -3818,6 +3822,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
     newChat,
     openBlankChat,
     loadThread,
+    isThreadDeleted: (id: string) => deletedThreads.has(id),
     entries: computed(() => conversationStore.entries),
     status: computed(() => conversationStore.status),
     isStreaming: computed(() => conversationStore.isStreaming),

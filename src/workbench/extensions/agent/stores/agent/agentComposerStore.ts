@@ -719,8 +719,9 @@ export const useAgentComposerStore = defineStore('agentComposer', () => {
     releaseUnusedAssets()
   }
 
-  function releaseUnusedAssets(): void {
+  function releaseUnusedAssets(preserveAssetIds?: readonly string[]): void {
     const retained = new Set(attachments.value.map(({ id }) => id))
+    for (const id of preserveAssetIds ?? []) retained.add(id)
     for (const ownerIds of retainedByOwner.values())
       for (const id of ownerIds) retained.add(id)
     for (const kept of keptDrafts.values())
@@ -813,17 +814,17 @@ export const useAgentComposerStore = defineStore('agentComposer', () => {
     return current
   }
 
-  function trimKeptDrafts(): void {
+  function trimKeptDrafts(preserveAssetIds?: readonly string[]): void {
     let evicted = false
     for (const key of keptDrafts.keys()) {
       if (keptDrafts.size <= MAX_KEPT_DRAFTS) break
       keptDrafts.delete(key)
       evicted = true
     }
-    if (evicted) releaseUnusedAssets()
+    if (evicted) releaseUnusedAssets(preserveAssetIds)
   }
 
-  function keepActiveDraft(): void {
+  function keepActiveDraft(preserveAssetIds?: readonly string[]): void {
     if (activeDraftKey === null) return
     keptDrafts.delete(activeDraftKey)
     const keptPrompt = toKeptPrompt(prompt.value)
@@ -840,7 +841,7 @@ export const useAgentComposerStore = defineStore('agentComposer', () => {
       origin: promptOrigin.value,
       starterPrompt: starterPrompt.value
     })
-    trimKeptDrafts()
+    trimKeptDrafts(preserveAssetIds)
   }
 
   function restoreKeptDraft(kept: KeptDraft): void {
@@ -861,12 +862,12 @@ export const useAgentComposerStore = defineStore('agentComposer', () => {
     if (key === activeDraftKey) return
     draftActivationCount += 1
     const adoptsCurrentContent = activeDraftKey === null
-    keepActiveDraft()
+    const kept = adoptsCurrentContent ? undefined : keptDrafts.get(key)
+    if (kept !== undefined) keptDrafts.delete(key)
+    keepActiveDraft(kept?.attachmentIds)
     activeDraftKey = key
     if (adoptsCurrentContent) return
-    const kept = keptDrafts.get(key) ?? emptyKeptDraft()
-    keptDrafts.delete(key)
-    restoreKeptDraft(kept)
+    restoreKeptDraft(kept ?? emptyKeptDraft())
   }
 
   function rekeyDraft(from: string, to: string): void {
@@ -891,8 +892,9 @@ export const useAgentComposerStore = defineStore('agentComposer', () => {
     key: string,
     snapshot: GateHoldSnapshot
   ): void {
-    keptDrafts.delete(key)
-    keptDrafts.set(key, {
+    const targetKey = resolveDraftKey(key) ?? key
+    if (targetKey === activeDraftKey || keptDrafts.has(targetKey)) return
+    keptDrafts.set(targetKey, {
       prompt: toKeptPrompt(snapshot.prompt),
       attachmentIds: snapshot.attachments.map(({ id }) => id),
       origin: snapshot.promptOrigin,
