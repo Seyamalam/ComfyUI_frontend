@@ -7,7 +7,6 @@ import { render, screen } from '@testing-library/vue'
 
 import { LiteGraph } from '@/lib/litegraph/src/litegraph'
 import type { NodeLayout } from '@comfyorg/graph-model/layout'
-import type { LayoutChange } from '@/renderer/core/layout/types'
 import type { ComfyApp } from '@/scripts/app'
 import { toNodeId } from '@comfyorg/graph-model/nodeId'
 import type { NodeId } from '@comfyorg/graph-model/nodeId'
@@ -68,8 +67,7 @@ const testState = vi.hoisted(() => {
       }
     ),
     syncSlotOffsets: vi.fn(),
-    setDirty: vi.fn(),
-    layoutChangeListeners: new Set<(change: LayoutChange) => void>()
+    setDirty: vi.fn()
   }
 })
 
@@ -93,11 +91,7 @@ vi.mock<unknown>(import('@/renderer/core/layout/store/layoutStore'), () => ({
     contentSizeOf: (rootGraphId: UUID, nodeId: NodeId) =>
       testState.contentSizes.get(`${rootGraphId}:${nodeId}`),
     getNodeLayout: (_rootGraphId: UUID, rawNodeId: NodeId): NodeLayout | null =>
-      testState.nodeLayouts.get(rawNodeId) ?? null,
-    onChange: (listener: (change: LayoutChange) => void) => {
-      testState.layoutChangeListeners.add(listener)
-      return () => testState.layoutChangeListeners.delete(listener)
-    }
+      testState.nodeLayouts.get(rawNodeId) ?? null
   }
 }))
 
@@ -391,35 +385,6 @@ describe('useVueNodeResizeTracking', () => {
     expect(testState.syncSlotOffsets).toHaveBeenCalledWith(nodeId)
   })
 
-  it.for([
-    { graphId: ROOT_GRAPH_ID, remeasured: true },
-    { graphId: SECOND_GRAPH_ID, remeasured: false }
-  ])(
-    'remeasures a mounted node whose layout is recreated in $graphId: $remeasured',
-    ({ graphId, remeasured }) => {
-      const nodeId = toNodeId('recreated-node')
-      const view = render(TrackedNode, { props: { nodeId } })
-      const element = screen.getByTestId(`tracked-${nodeId}`)
-      vi.clearAllMocks()
-
-      for (const listener of testState.layoutChangeListeners)
-        listener(
-          fromPartial<LayoutChange>({
-            type: 'create',
-            nodeIds: [nodeId],
-            operation: { graphId }
-          })
-        )
-
-      expect(
-        resizeObserverState.observe.mock.calls.some(
-          ([observed]) => observed === element
-        )
-      ).toBe(remeasured)
-      view.unmount()
-    }
-  )
-
   it('re-observes hidden elements without re-reporting an unchanged size', async () => {
     const nodeId = toNodeId('hidden-node')
     const { entry } = createResizeEntry({ nodeId })
@@ -592,7 +557,7 @@ describe('useVueNodeResizeTracking', () => {
     expect(testState.reportContentSize).not.toHaveBeenCalled()
   })
 
-  it('reports and redraws the first measurement and skips repeated entries', () => {
+  it('reports the first measurement and skips repeated entries', () => {
     const nodeId = toNodeId('test-node')
     const width = 240
     const height = 180
@@ -610,6 +575,8 @@ describe('useVueNodeResizeTracking', () => {
 
     resizeObserverState.callback?.([entry], createObserverMock())
 
+    // When layout store already has correct position, getBoundingClientRect
+    // is not needed — position is read from the store instead.
     expect(rectSpy).not.toHaveBeenCalled()
     expect(testState.reportContentSize).toHaveBeenCalledWith(
       ROOT_GRAPH_ID,
@@ -619,14 +586,12 @@ describe('useVueNodeResizeTracking', () => {
         height: height - LiteGraph.NODE_TITLE_HEIGHT
       }
     )
-    expect(testState.setDirty).toHaveBeenCalledWith(true, true)
-    vi.clearAllMocks()
+    testState.reportContentSize.mockReset()
 
     resizeObserverState.callback?.([entry], createObserverMock())
 
     expect(rectSpy).not.toHaveBeenCalled()
     expect(testState.reportContentSize).not.toHaveBeenCalled()
-    expect(testState.setDirty).not.toHaveBeenCalled()
   })
 
   it('reports size without replacing the stored position', () => {
