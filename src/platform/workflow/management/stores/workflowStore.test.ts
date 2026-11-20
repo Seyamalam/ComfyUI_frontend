@@ -8,7 +8,7 @@ import {
   vi
 } from 'vitest'
 import { fromAny, fromPartial } from '@total-typescript/shoehorn'
-import { nextTick, reactive } from 'vue'
+import { nextTick, reactive, toRaw } from 'vue'
 
 import type { LGraph, Subgraph } from '@/lib/litegraph/src/litegraph'
 import { useSettingStore } from '@/platform/settings/settingStore'
@@ -847,6 +847,8 @@ describe('useWorkflowStore', () => {
         'workflows/First.json',
         'workflows/Second.json'
       ])
+      expect(toRaw(store.openWorkflows[0])).toBe(toRaw(first))
+      expect(toRaw(store.openWorkflows[1])).toBe(toRaw(second))
       expect(store.getWorkflowByPath('workflows/Second.json')?.key).toBe(
         second.key
       )
