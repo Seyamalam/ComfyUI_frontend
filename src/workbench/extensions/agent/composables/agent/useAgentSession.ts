@@ -392,15 +392,22 @@ type AnswerReceiptSource =
   | AgentAnswerReceipt
   | ZodInfer<typeof zAgentAskConflict>
 
-const pendingSupersededNoticeThreads = new Set<string>()
+type AskNoticeSink = (owner: string, notice: string) => boolean
+
+const activeAskNoticeSinks = new Set<AskNoticeSink>()
+const pendingAskNotices = new Map<string, Set<string>>()
 
 function namesCommittedAnswer(
   { selected, other_text }: CommittedAnswerSource,
-  minSelections?: number
+  minSelections?: number,
+  submitted?: AgentAnswerRequest
 ): boolean {
   if (other_text) return true
   if (!Array.isArray(selected)) return false
-  return selected.length > 0 || minSelections === 0
+  return (
+    selected.length > 0 ||
+    (minSelections === 0 && submitted?.selected.length === 0)
+  )
 }
 
 function diffAnswers(
@@ -701,16 +708,24 @@ export function useAgentSession(deps: AgentSessionDeps) {
   }
 
   function showOrQueueSupersededNotice(owner: string): void {
-    if (owner === conversationStore.threadId) {
-      pushError(i18n.global.t('agent.runApproval.answerSuperseded'))
+    showOrQueueAskNotice(
+      owner,
+      i18n.global.t('agent.runApproval.answerSuperseded')
+    )
+  }
+
+  function showOrQueueAskNotice(owner: string, notice: string): void {
+    if (!stopped && owner === conversationStore.threadId) {
+      pushError(notice)
       return
     }
-    pendingSupersededNoticeThreads.delete(owner)
-    pendingSupersededNoticeThreads.add(owner)
-    while (pendingSupersededNoticeThreads.size > MAX_DELIVERED_ASKS)
-      pendingSupersededNoticeThreads.delete(
-        pendingSupersededNoticeThreads.values().next().value!
-      )
+    for (const sink of activeAskNoticeSinks) if (sink(owner, notice)) return
+    const notices = pendingAskNotices.get(owner) ?? new Set<string>()
+    notices.add(notice)
+    pendingAskNotices.delete(owner)
+    pendingAskNotices.set(owner, notices)
+    while (pendingAskNotices.size > MAX_DELIVERED_ASKS)
+      pendingAskNotices.delete(pendingAskNotices.keys().next().value!)
   }
 
   function recordPendingAskObservation(
@@ -746,6 +761,12 @@ export function useAgentSession(deps: AgentSessionDeps) {
 
   function pushError(text: string): void {
     notices.value.push({ level: 'error', text })
+  }
+
+  const askNoticeSink: AskNoticeSink = (owner, notice) => {
+    if (stopped || owner !== conversationStore.threadId) return false
+    pushError(notice)
+    return true
   }
 
   const malformedStreamReports = new Map<TurnId | null, boolean>()
@@ -795,6 +816,8 @@ export function useAgentSession(deps: AgentSessionDeps) {
 
   function start({ restore = true }: { restore?: boolean } = {}): void {
     stopped = false
+    activeAskNoticeSinks.clear()
+    activeAskNoticeSinks.add(askNoticeSink)
     readyThreadId.value = null
     ownedGeneration = ++sessionGeneration
     connection = 'initial'
@@ -1065,8 +1088,11 @@ export function useAgentSession(deps: AgentSessionDeps) {
     rememberSnapshotTurn(conversationStore.activeTurnId)
     reconcileLiveTurns('hydrate', threadId)
     readyThreadId.value = threadId
-    if (pendingSupersededNoticeThreads.delete(threadId))
-      pushError(i18n.global.t('agent.runApproval.answerSuperseded'))
+    const pendingNotices = pendingAskNotices.get(threadId)
+    if (pendingNotices) {
+      pendingAskNotices.delete(threadId)
+      for (const notice of pendingNotices) pushError(notice)
+    }
     drainHydration(buffer)
     const workflowReady = await workflow?.restored?.(
       conversationStore.latestWorkflowId,
@@ -1147,6 +1173,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
 
   function stop(): void {
     stopped = true
+    activeAskNoticeSinks.delete(askNoticeSink)
     readyThreadId.value = null
     unsubscribe?.()
     unsubscribeStatus?.()
@@ -1970,7 +1997,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
     minSelections: number | undefined
     resolutionChannelDropped: () => boolean
   }): boolean {
-    if (!receiptNamesCommittedAnswer(receipt, minSelections))
+    if (!receiptNamesCommittedAnswer(receipt, minSelections, answer))
       return commitStatusOnlyAskReceipt({
         askId,
         answer,
@@ -1990,10 +2017,11 @@ export function useAgentSession(deps: AgentSessionDeps) {
 
   function receiptNamesCommittedAnswer(
     receipt: AnswerReceiptSource,
-    minSelections: number | undefined
+    minSelections: number | undefined,
+    submitted?: AgentAnswerRequest
   ): boolean {
     if (receipt.status !== 'answered') return false
-    return namesCommittedAnswer(receipt, minSelections)
+    return namesCommittedAnswer(receipt, minSelections, submitted)
   }
 
   function commitStatusOnlyAskReceipt({
@@ -2107,7 +2135,11 @@ export function useAgentSession(deps: AgentSessionDeps) {
         resolutionChannelWasLost
       )
     }
-    const failure = classifyAnswerFailure(error)
+    const classifiedFailure = classifyAnswerFailure(error)
+    const failure =
+      answerRetried && classifiedFailure === 'refused'
+        ? 'unconfirmed'
+        : classifiedFailure
     reportError(error, {
       surface: 'agent',
       errorType: ANSWER_FAILURE_ERROR_TYPES[failure]
@@ -2120,12 +2152,16 @@ export function useAgentSession(deps: AgentSessionDeps) {
         deliveredAsks.delete(askId)
         conversationStore.takeSubmittedAskAnswer(askId)
         conversationStore.setAskAnswering(askId, false)
-        if (conversationStore.threadId === threadId)
-          pushError(i18n.global.t('agent.askUser.answerRejected'))
+        showOrQueueAskNotice(
+          threadId,
+          i18n.global.t('agent.askUser.answerRejected')
+        )
       },
       refused: () => {
-        if (conversationStore.threadId === threadId)
-          pushError(i18n.global.t('agent.runApproval.answerFailed'))
+        showOrQueueAskNotice(
+          threadId,
+          i18n.global.t('agent.runApproval.answerFailed')
+        )
         conversationStore.retireAsk(askId, { status: 'retired' }, threadId)
       },
       unconfirmed: () => {
@@ -2134,10 +2170,15 @@ export function useAgentSession(deps: AgentSessionDeps) {
           askId,
           { status: 'unconfirmed' },
           threadId,
-          false
+          false,
+          undefined,
+          answerRetried
         )
-        if (conversationStore.threadId === threadId)
-          pushError(i18n.global.t('agent.runApproval.answerUncertain'))
+        if (answerRetried) conversationStore.deferSubmittedAskCleanup(askId)
+        showOrQueueAskNotice(
+          threadId,
+          i18n.global.t('agent.runApproval.answerUncertain')
+        )
       }
     }
     settle[failure]()
@@ -2168,7 +2209,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
     const submitted = conversationStore.submittedAskAnswer(askId)
     if (
       conflict.success &&
-      receiptNamesCommittedAnswer(conflict.data, minSelections)
+      receiptNamesCommittedAnswer(conflict.data, minSelections, submitted)
     ) {
       const committed = toAskResolution(conflict.data)
       const superseded =
@@ -2217,7 +2258,16 @@ export function useAgentSession(deps: AgentSessionDeps) {
       submitted !== undefined
     )
     if (!answerRetried) {
-      if (submitted !== undefined)
+      if (resolutionChannelWasLost) {
+        if (recordAnswerReport(supersededAnswerReports, askId)) {
+          reportError(new Error('ask answer lost a first-attempt conflict'), {
+            surface: 'agent',
+            errorType: 'agent_ask_answer_superseded'
+          })
+          showOrQueueSupersededNotice(threadId)
+        }
+        conversationStore.completeAskResolutionReport(askId)
+      } else if (submitted !== undefined)
         conversationStore.deferSubmittedAskCleanup(askId)
       return
     }
@@ -2263,7 +2313,8 @@ export function useAgentSession(deps: AgentSessionDeps) {
     if (
       !namesCommittedAnswer(
         source,
-        conversationStore.submittedAskMinSelections(askId)
+        conversationStore.submittedAskMinSelections(askId),
+        conversationStore.submittedAskAnswer(askId)
       )
     )
       return
@@ -2327,7 +2378,9 @@ export function useAgentSession(deps: AgentSessionDeps) {
     loadGeneration++
     promptEditState.value = { phase: 'idle' }
     conversationStore.stashActiveTurn()
-    conversationStore.reset()
+    conversationStore.reset({
+      discardCurrentThread: source === 'history_delete'
+    })
     pruneSkillTurns()
     onThreadActivated?.(null)
     forgetBinding()
@@ -2521,7 +2574,8 @@ export function useAgentSession(deps: AgentSessionDeps) {
       event.data.status === 'answered' &&
       namesCommittedAnswer(
         event.data,
-        conversationStore.submittedAskMinSelections(event.data.ask_id)
+        conversationStore.submittedAskMinSelections(event.data.ask_id),
+        conversationStore.submittedAskAnswer(event.data.ask_id)
       )
     if (event.data.status !== 'answered' || namesAnswer)
       conversationStore.clearAskAwaitingResolution(event.data.ask_id)
@@ -2532,7 +2586,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
       event.data.thread_id,
       true,
       undefined,
-      !namesAnswer
+      event.data.status === 'answered' && !namesAnswer
     )
     recordDeliveredAsk(event.data.ask_id)
     onAskResolved?.(event.data.ask_id)
@@ -2587,9 +2641,10 @@ export function useAgentSession(deps: AgentSessionDeps) {
       conversationStore.markActiveTurnMissedFrames()
       reconcileLiveTurns('reconnect')
     } else if (firstLive) {
-      if (initialStatusWasOffline) reconcileLiveTurns('reconnect')
-      else if (conversationStore.threadId !== null)
-        reconcileLiveTurns('hydrate', conversationStore.threadId)
+      if (initialStatusWasOffline) {
+        conversationStore.markActiveTurnMissedFrames()
+        reconcileLiveTurns('reconnect')
+      } else reconcileLiveTurns('hydrate')
     }
   }
 
@@ -2764,7 +2819,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
       conversationStore.reconcileSettledTurn(turn, undefined)
     if (ownsKey) recoveryPendingAskObservations.delete(key)
     finishRecovery(key, recovery, state, turn)
-    if (ownsKey && isTurnLive(turn, generation))
+    if (ownsKey && !state.rerun && isTurnLive(turn, generation))
       void reconcileTurn(turn, 'hydrate')
   }
 
@@ -3261,6 +3316,7 @@ export function useAgentSession(deps: AgentSessionDeps) {
     recoveryPendingAskObservations.delete(recoveryKey(turn))
     clearLateAskReports(turn.threadId)
     if (conversationStore.threadId !== turn.threadId) {
+      conversationStore.discardAskState(turn.threadId)
       conversationStore.settleTurn(turn, undefined, 'failed')
       return
     }
