@@ -58,21 +58,21 @@ import { useWorkflowStore } from '@/platform/workflow/management/stores/workflow
 import { useCanvasStore } from '@/renderer/core/canvas/canvasStore'
 import { useCanvasInteractions } from '@/renderer/core/canvas/useCanvasInteractions'
 import {
-  snapBoxOf,
+  evenGap,
+  nodeBox,
   nodePlacement,
   positionForBox
-} from '@/renderer/core/canvas/smartGuides/dragSnapSession'
-import type { NodePlacement } from '@/renderer/core/canvas/smartGuides/dragSnapSession'
+} from '@/lib/litegraph/src/utils/arrange'
+import type {
+  Axis,
+  NodePlacement,
+  VisualBox
+} from '@/lib/litegraph/src/utils/arrange'
 import {
-  evenGap,
   gapAfterTravel,
   setGap
 } from '@/renderer/core/canvas/smartGuides/distributeGaps'
 import { distributeSession } from '@/renderer/core/canvas/smartGuides/smartGuidesState'
-import type {
-  Axis,
-  SnapBox
-} from '@/renderer/core/canvas/smartGuides/snapSolver'
 import { useLayoutMutations } from '@/renderer/core/layout/operations/layoutMutations'
 import { LayoutSource } from '@/renderer/core/layout/types'
 
@@ -104,7 +104,7 @@ function sessionNodes(canvas: LGraphCanvas): LGraphNode[] | undefined {
 
 function computeHandles(
   canvas: LGraphCanvas,
-  boxes: SnapBox[],
+  boxes: VisualBox[],
   along: Axis,
   gap: number
 ): GapHandle[] {
@@ -143,7 +143,7 @@ watch(
           if (handles.value.length) handles.value = []
           return
         }
-        const boxes = sessionNodes(canvas)?.map(snapBoxOf)
+        const boxes = sessionNodes(canvas)?.map(nodeBox)
         const gap = boxes && evenGap(boxes, along)
         if (!boxes || gap === undefined || gap < 0) {
           clearHandles()
@@ -161,7 +161,7 @@ function applyBoxes(
   canvas: LGraphCanvas,
   rootGraphId: string,
   placements: NodePlacement[],
-  boxes: SnapBox[]
+  boxes: VisualBox[]
 ) {
   mutations.batchMoveNodes(
     rootGraphId,

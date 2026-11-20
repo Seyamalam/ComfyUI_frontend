@@ -1,11 +1,7 @@
-import type { Bounds, Point2D } from '@comfyorg/shared-frontend-utils/geometry'
+import type { Point2D } from '@comfyorg/shared-frontend-utils/geometry'
 
-export type Axis = 'x' | 'y'
-
-/** A visual box in canvas units; `titleHeight` is the title band above the body. */
-export interface SnapBox extends Bounds {
-  titleHeight: number
-}
+import { ALIGNED_EPSILON } from '@/lib/litegraph/src/utils/arrange'
+import type { Axis, VisualBox } from '@/lib/litegraph/src/utils/arrange'
 
 export interface ResizeEdges {
   x?: 'left' | 'right'
@@ -40,8 +36,8 @@ interface SnapLine {
   anchor: Anchor
   value: number
   kind: SnapKind
-  isValid?: (box: SnapBox) => boolean
-  guides: (box: SnapBox) => SmartGuide[]
+  isValid?: (box: VisualBox) => boolean
+  guides: (box: VisualBox) => SmartGuide[]
 }
 
 export interface SnapOptions {
@@ -60,7 +56,7 @@ export type SnapAttachment = Partial<Record<Axis, string>>
 
 export interface SnapIndex {
   lines: Record<Axis, SnapLine[]>
-  targets: SnapBox[]
+  targets: VisualBox[]
 }
 
 interface SnapFrame {
@@ -74,14 +70,13 @@ const KIND_PRIORITY: Record<SnapKind, number> = {
   edge: 1
 }
 
-export const ALIGNED_EPSILON = 0.5
 const MAX_SPACING_TARGETS = 400
 
-const right = (b: SnapBox) => b.x + b.width
-const bottom = (b: SnapBox) => b.y + b.height
-const bodyTop = (b: SnapBox) => b.y + b.titleHeight
+const right = (b: VisualBox) => b.x + b.width
+const bottom = (b: VisualBox) => b.y + b.height
+const bodyTop = (b: VisualBox) => b.y + b.titleHeight
 
-function anchorValue(box: SnapBox, anchor: Anchor): number {
+function anchorValue(box: VisualBox, anchor: Anchor): number {
   switch (anchor) {
     case 'left':
       return box.x
@@ -100,17 +95,17 @@ function anchorValue(box: SnapBox, anchor: Anchor): number {
   }
 }
 
-function crossRange(box: SnapBox, axis: Axis): [number, number] {
+function crossRange(box: VisualBox, axis: Axis): [number, number] {
   return axis === 'x' ? [box.y, bottom(box)] : [box.x, right(box)]
 }
 
-function overlapsAcross(a: SnapBox, b: SnapBox, axis: Axis): boolean {
+function overlapsAcross(a: VisualBox, b: VisualBox, axis: Axis): boolean {
   const [a0, a1] = crossRange(a, axis)
   const [b0, b1] = crossRange(b, axis)
   return a0 < b1 && b0 < a1
 }
 
-function spanLine(axis: Axis, at: number, boxes: SnapBox[]): SmartGuide {
+function spanLine(axis: Axis, at: number, boxes: VisualBox[]): SmartGuide {
   const ranges = boxes.map((b) => crossRange(b, axis))
   return {
     kind: 'line',
@@ -121,7 +116,7 @@ function spanLine(axis: Axis, at: number, boxes: SnapBox[]): SmartGuide {
   }
 }
 
-function gapGuide(axis: Axis, first: SnapBox, second: SnapBox): SmartGuide {
+function gapGuide(axis: Axis, first: VisualBox, second: VisualBox): SmartGuide {
   const [a0, a1] = crossRange(first, axis)
   const [b0, b1] = crossRange(second, axis)
   const from = axis === 'x' ? right(first) : bottom(first)
@@ -135,11 +130,15 @@ function gapGuide(axis: Axis, first: SnapBox, second: SnapBox): SmartGuide {
   }
 }
 
-function orderedAlong(a: SnapBox, b: SnapBox, axis: Axis): [SnapBox, SnapBox] {
+function orderedAlong(
+  a: VisualBox,
+  b: VisualBox,
+  axis: Axis
+): [VisualBox, VisualBox] {
   return (axis === 'x' ? a.x <= b.x : a.y <= b.y) ? [a, b] : [b, a]
 }
 
-function edgeLines(target: SnapBox, id: string, gap: number): SnapLine[] {
+function edgeLines(target: VisualBox, id: string, gap: number): SnapLine[] {
   const align = (
     axis: Axis,
     anchor: Anchor,
@@ -183,8 +182,8 @@ function edgeLines(target: SnapBox, id: string, gap: number): SnapLine[] {
 }
 
 function spacingLinesFor(
-  first: SnapBox,
-  second: SnapBox,
+  first: VisualBox,
+  second: VisualBox,
   key: string,
   axis: Axis
 ): SnapLine[] {
@@ -196,9 +195,9 @@ function spacingLinesFor(
   const room = secondStart - firstEnd
   if (room <= 0) return []
 
-  const overlapsBoth = (box: SnapBox) =>
+  const overlapsBoth = (box: VisualBox) =>
     overlapsAcross(box, first, axis) && overlapsAcross(box, second, axis)
-  const size = (box: SnapBox) => (axis === 'x' ? box.width : box.height)
+  const size = (box: VisualBox) => (axis === 'x' ? box.width : box.height)
 
   return [
     {
@@ -237,7 +236,7 @@ function spacingLinesFor(
   ]
 }
 
-function spacingLines(targets: SnapBox[]): SnapLine[] {
+function spacingLines(targets: VisualBox[]): SnapLine[] {
   if (targets.length > MAX_SPACING_TARGETS) return []
   const lines: SnapLine[] = []
   for (const axis of ['x', 'y'] as const) {
@@ -271,7 +270,7 @@ function spacingLines(targets: SnapBox[]): SnapLine[] {
   return lines
 }
 
-function wireLines(movingStart: SnapBox, wires: WireAnchor[]): SnapLine[] {
+function wireLines(movingStart: VisualBox, wires: WireAnchor[]): SnapLine[] {
   return wires.map((wire, index) => {
     const offset = {
       x: wire.mine.x - movingStart.x,
@@ -295,9 +294,9 @@ function wireLines(movingStart: SnapBox, wires: WireAnchor[]): SnapLine[] {
 }
 
 export function buildSnapIndex(
-  targets: SnapBox[],
+  targets: VisualBox[],
   options: SnapOptions,
-  wiring?: { movingStart: SnapBox; wires: WireAnchor[] }
+  wiring?: { movingStart: VisualBox; wires: WireAnchor[] }
 ): SnapIndex {
   const all = [
     ...(options.edges
@@ -322,11 +321,11 @@ interface Candidate {
   delta: number
 }
 
-type ApplyDelta = (box: SnapBox, axis: Axis, delta: number) => SnapBox
+type ApplyDelta = (box: VisualBox, axis: Axis, delta: number) => VisualBox
 
 function candidatesFor(
   lines: SnapLine[],
-  box: SnapBox,
+  box: VisualBox,
   anchors: readonly Anchor[],
   reach: number,
   apply: ApplyDelta
@@ -342,7 +341,7 @@ function candidatesFor(
   return candidates
 }
 
-function moved(box: SnapBox, axis: Axis, delta: number): SnapBox {
+function moved(box: VisualBox, axis: Axis, delta: number): VisualBox {
   return axis === 'x'
     ? { ...box, x: box.x + delta }
     : { ...box, y: box.y + delta }
@@ -376,7 +375,7 @@ const MOVE_ANCHORS: Record<Axis, readonly Anchor[]> = {
 }
 
 export interface SnapResult {
-  box: SnapBox
+  box: VisualBox
   attachment: SnapAttachment
   guides: SmartGuide[]
 }
@@ -392,13 +391,13 @@ const ALIGNABLE: Record<Anchor, readonly Anchor[]> = {
 }
 
 function alignedGuides(
-  box: SnapBox,
-  targets: SnapBox[],
+  box: VisualBox,
+  targets: VisualBox[],
   anchors: Record<Axis, readonly Anchor[]>
 ): SmartGuide[] {
   const guides: SmartGuide[] = []
   for (const axis of ['x', 'y'] as const) {
-    const aligned = new Map<number, SnapBox[]>()
+    const aligned = new Map<number, VisualBox[]>()
     for (const anchor of anchors[axis]) {
       const value = anchorValue(box, anchor)
       for (const target of targets) {
@@ -418,7 +417,7 @@ function alignedGuides(
 
 function solve(
   index: SnapIndex,
-  box: SnapBox,
+  box: VisualBox,
   { threshold, attachment = {} }: SnapFrame,
   anchors: Record<Axis, readonly Anchor[]>,
   apply: ApplyDelta
@@ -459,7 +458,7 @@ function solve(
 /** Snaps a moving box: returns the snapped box, the attachment to feed back next frame, and guides to draw. */
 export function snapMove(
   index: SnapIndex,
-  box: SnapBox,
+  box: VisualBox,
   frame: SnapFrame
 ): SnapResult {
   return solve(index, box, frame, MOVE_ANCHORS, moved)
@@ -487,7 +486,7 @@ function resizedEdge(edges: ResizeEdges): ApplyDelta {
 
 export function snapResize(
   index: SnapIndex,
-  box: SnapBox,
+  box: VisualBox,
   edges: ResizeEdges,
   frame: SnapFrame
 ): SnapResult {
