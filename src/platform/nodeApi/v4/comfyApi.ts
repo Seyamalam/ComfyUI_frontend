@@ -199,8 +199,7 @@ export function createComfyApi(services: ComfyApiServices): ComfyApi {
     ui: chrome.ui,
     localization: createLocalizationHandle(),
     system: createSystemHandle(),
-    sameEntity: (a: unknown, b: unknown) => a === b && handles.owns(a),
-    edit
+    sameEntity: (a: unknown, b: unknown) => a === b && handles.owns(a)
   })
 
   return {
